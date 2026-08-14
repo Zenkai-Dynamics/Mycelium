@@ -30,6 +30,20 @@ version. Found and fixed during issue #6's real-hardware validation —
 full debugging narrative in
 [the issue #6 design doc](superpowers/specs/2026-08-14-issue-6-validate-model-vllm-design.md).
 
+Pinning `nvidia-cuda-nvcc` this way has a downstream effect worth calling
+out: it forces `uv`'s resolver to also downgrade `cuda-tile` from `1.3.0`
+to `1.1.0` and drop the `nvidia-cuda-tileiras` package entirely, since
+`cuda-tile==1.1.0` doesn't have a `tileiras` extra to satisfy
+`flashinfer-python`'s declared dependency on `cuda-tile[tileiras]`. This
+is an accepted, deliberate consequence of the fix, not an oversight — the
+constraint's whole point was forcing the CUDA sub-package versions to
+align, and this is the actual dependency graph that results. The bare-pip
+fallback path (`pip install -r requirements-node-lock.txt`) prints
+`WARNING: cuda-tile 1.1.0 does not provide the extra 'tileiras'` during
+install but still completes successfully and `import ray, vllm` still
+works — re-verified live on `a6000` (`ray 2.57.0`, `vllm 0.25.1`) after
+this pin landed.
+
 ## Pinned versions (`mycelium` base / `mycelium[coordinator]`)
 
 | Package | Version | Why this exact version |
@@ -46,6 +60,12 @@ Regenerate both together whenever a pin changes:
 uv lock
 uv export --extra node --no-emit-project -o requirements-node-lock.txt
 ```
+
+After regenerating, verify with a real `vllm serve <model>` + one
+completion on a GPU node, not just `import ray, vllm` — an import-only
+check does not exercise flashinfer's JIT kernel compilation and would not
+have caught the `nvidia-cuda-nvcc` drift documented above (see the issue
+#6 design doc).
 
 Never hand-edit either file.
 
@@ -151,7 +171,7 @@ $ CUDA_VISIBLE_DEVICES=0 VLLM_USE_FLASHINFER_SAMPLER=0 \
 ...
 INFO:     Application startup complete.
 
-$ curl http://localhost:8811/v1/chat/completions -d '{"model": "Qwen/Qwen2.5-7B-Instruct",
+$ curl http://localhost:8811/v1/chat/completions -H "Content-Type: application/json" -d '{"model": "Qwen/Qwen2.5-7B-Instruct",
   "messages": [{"role": "user", "content": "What is the capital of France? Answer in one word."}]}'
 # → "Paris"
 ```

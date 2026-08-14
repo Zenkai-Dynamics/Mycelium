@@ -118,7 +118,7 @@ not the raw `/v1/completions` endpoint — matches how an Instruct-tuned
 model is actually meant to be used, and is the interface a real client
 would eventually talk to.
 
-**No new ADR.** Unlike [ADR-0002](../adr/0002-node-transport-model.md)
+**No new ADR.** Unlike [ADR-0002](../../adr/0002-node-transport-model.md)
 (issue #4), this is a parameter/spec choice (which model, sized how)
 rather than an architectural decision — issue #6's acceptance criteria
 only asks for the `docs/phases/phase-0-foundation.md` update, and that's
@@ -181,9 +181,13 @@ exercised this path — it only checked `import ray, vllm` and
 `ray.serve.llm`, not a real serve+sample call).
 
 **Attempt 3 — aligned toolchain, same `FlagHeads` error resurfaces.**
-With `nvidia-cuda-nvcc`/`nvidia-cuda-runtime` now aligned to the same
-13.0.x line (no manual `PATH` override needed — `uv sync` alone now
-resolves a self-consistent toolchain), the *original* `FlagHeads` error
+nvcc and the runtime headers it version-checks against
+(`nvidia-cuda-runtime`/`nvidia-cuda-nvrtc`) are now aligned to 13.0.x —
+`nvidia-cuda-crt`, `nvidia-nvvm`, and `nvidia-cuda-cccl` remain
+resolver-chosen on their own release lines and aren't constrained by this
+fix; it works today but isn't a guarantee against the same class of drift
+recurring for a different sub-package pair on a future `uv lock` refresh.
+With no manual `PATH` override needed, the *original* `FlagHeads` error
 came back, unchanged. This ruled out "CUDA toolkit version" as the cause
 of `FlagHeads` specifically — the error is independent of which
 internally-consistent CUDA generation compiles it. Traced further:
@@ -213,14 +217,16 @@ about vLLM serving working and returning correct completions — not about
 `flashinfer`'s specific fused-kernel sampling throughput. Setting
 `VLLM_USE_FLASHINFER_SAMPLER=0` let the server start and serve cleanly.
 
-**Final verified result**, `CUDA_VISIBLE_DEVICES=0`,
+**Final verified result**, run via a fresh `uv sync --extra node` against
+the corrected, committed lock — no manual `PATH`/`CUDA_HOME` override
+(unlike Attempt 2) — with `CUDA_VISIBLE_DEVICES=0`,
 `HF_HOME=/mnt/disk1/Framework/mycelium-hf-cache`,
 `VLLM_USE_FLASHINFER_SAMPLER=0`:
 
 - `vllm serve Qwen/Qwen2.5-7B-Instruct --port 8811` → `Application startup complete`, all OpenAI-compatible routes registered including `/v1/chat/completions`.
 - Prompt 1: *"What is the capital of France? Answer in one word."* → **`"Paris"`**.
 - Prompt 2: *"What is 12 times 7? Answer with only the number."* → **`"84"`**.
-- `nvidia-smi` during serving: GPU 0 (the pinned device) at 45640/49140 MiB used; GPUs 1–3 at 4 MiB (idle) — confirms single-GPU pinning worked exactly as designed, not an accidental multi-GPU spread.
+- `nvidia-smi` during serving: GPU 0 (the pinned device) at 45640/49140 MiB used; GPUs 1–3 at 4 MiB (idle) — confirms single-GPU pinning worked exactly as designed, not an accidental multi-GPU spread (vLLM's default `gpu_memory_utilization=0.9` preallocates most of the card for KV cache by design — this is not the model's own footprint, which is the ~15 GB bf16 weight size noted above).
 
 **`VLLM_USE_FLASHINFER_SAMPLER=0` is a known limitation to carry
 forward**, not silently absorbed: issue #7 (node agent wraps vLLM) will
