@@ -2,7 +2,7 @@
 
 Status: **Building now**
 Depends on: nothing (first phase)
-Related: [ADR-0001 — project name](../adr/0001-project-name.md) · [Phase 0 design rationale](../superpowers/specs/2026-08-12-mycelium-phase0-design.md) · [Dependency & hardware compatibility](../dependencies.md)
+Related: [ADR-0001 — project name](../adr/0001-project-name.md) · [ADR-0002 — node transport model](../adr/0002-node-transport-model.md) · [Phase 0 design rationale](../superpowers/specs/2026-08-12-mycelium-phase0-design.md) · [Dependency & hardware compatibility](../dependencies.md)
 
 ## Goal
 
@@ -62,7 +62,7 @@ Phase 0 is done when:
 
 ## Open risks / unresolved decisions
 
-- **Node network reachability is unconfirmed.** The operator's candidate machines sit behind a CDAC HPC environment and a university VPN, which likely means no inbound connectivity to them. If so, the coordinator cannot dial into a node — the node would need to dial out and hold a connection open instead (the approach BOINC/ngrok/torrent trackers use). This is **not yet designed for**; it needs to be confirmed against the real hardware before the coordinator↔node transport is finalized.
+- **Node network reachability: resolved.** Confirmed against real candidate nodes — neither the VPN-gated lab machines (`a6000`/`h100`, private addresses, unreachable from the public internet by definition) nor the CDAC/IUAC HPC login node (`paramrudra`, a public IP where only its SSH port answers from outside) accept inbound connections on an arbitrary port. The node agent dials out to the coordinator and holds the connection open — the BOINC/ngrok/torrent-tracker pattern this doc already anticipated. See [ADR-0002](../adr/0002-node-transport-model.md) for the full investigation and decision.
 - **Node auth mechanism is a placeholder.** A shared pre-issued token per node is the working assumption for Phase 0's closed pool, but this hasn't been locked in.
 - **Exact model choice is pending real hardware specs** for the HPC/VPN nodes the operator will use.
 
