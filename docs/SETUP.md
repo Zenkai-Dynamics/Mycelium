@@ -77,3 +77,17 @@ Works on macOS, Linux, or Windows — no GPU needed.
    These are Phase 0 skeleton stubs (see
    [phase-0-foundation.md](phases/phase-0-foundation.md)) — they don't do
    anything functional yet beyond confirming they run.
+
+## Node / GPU setup
+
+Only needed if you're setting up a real Phase 0 GPU node — not required
+for developing against the coordinator or client.
+
+The node agent wraps Ray + vLLM (the `node` optional-dependency extra in
+`pyproject.toml`), which only resolves on **Linux x86_64** with a
+CUDA-capable GPU. See [dependencies.md](dependencies.md) for:
+
+- the exact pinned `ray`/`vllm` versions and why
+- the install commands (`uv sync --extra node`, or the
+  `requirements-node-lock.txt` plain-pip fallback)
+- minimum CUDA/driver version and required GPU compute capability
