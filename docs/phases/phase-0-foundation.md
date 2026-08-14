@@ -2,7 +2,7 @@
 
 Status: **Building now**
 Depends on: nothing (first phase)
-Related: [ADR-0001 — project name](../adr/0001-project-name.md) · [Phase 0 design rationale](../superpowers/specs/2026-08-12-mycelium-phase0-design.md)
+Related: [ADR-0001 — project name](../adr/0001-project-name.md) · [Phase 0 design rationale](../superpowers/specs/2026-08-12-mycelium-phase0-design.md) · [Dependency & hardware compatibility](../dependencies.md)
 
 ## Goal
 
