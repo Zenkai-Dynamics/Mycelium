@@ -18,7 +18,10 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-node = []
+node = [
+    "ray[llm]==2.57.0",
+    "vllm[audio]==0.25.1",
+]
 coordinator = []
 client = []
 
@@ -32,3 +35,8 @@ version = {attr = "mycelium.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.uv]
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
