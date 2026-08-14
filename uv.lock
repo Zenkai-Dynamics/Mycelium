@@ -11,6 +11,9 @@ supported-markers = [
     "platform_machine == 'x86_64' and sys_platform == 'linux'",
 ]
 
+[manifest]
+constraints = [{ name = "nvidia-cuda-nvcc", specifier = "==13.0.88" }]
+
 [[package]]
 name = "aiohappyeyeballs"
 version = "2.7.1"
@@ -403,22 +406,15 @@ wheels = [
 
 [[package]]
 name = "cuda-tile"
-version = "1.3.0"
+version = "1.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "typing-extensions", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c5/2d/8b416239413bf11d17d42ccee43258f3787da13bcea7b2e42e8bbf04b3da/cuda_tile-1.3.0-cp311-cp311-manylinux2014_x86_64.whl", hash = "sha256:2888d6b89fae053a53ca7bb703c508a5cf90671d266934573c5b6c25978022c4", size = 246706, upload-time = "2026-04-20T15:51:03.467Z" },
-    { url = "https://files.pythonhosted.org/packages/40/76/84cb68be463c827bf79da9fa0aa5140838de6455ef6f438bbe0ffa75d378/cuda_tile-1.3.0-cp312-cp312-manylinux2014_x86_64.whl", hash = "sha256:e4865acbff1172aaee304bf9c550586088d8b4545a384423597a590899386709", size = 247301, upload-time = "2026-04-20T15:51:04.042Z" },
-    { url = "https://files.pythonhosted.org/packages/35/20/e1daea2dc4e094290ba727750f8342095ae857ff3ba4f81c489f48688613/cuda_tile-1.3.0-cp313-cp313-manylinux2014_x86_64.whl", hash = "sha256:a44a81e255fdb7bf8e1f7511fe3a019e6045024574509ea8548e0f71f25f8473", size = 247300, upload-time = "2026-04-20T15:51:03.072Z" },
-]
-
-[package.optional-dependencies]
-tileiras = [
-    { name = "nvidia-cuda-nvcc", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "nvidia-cuda-tileiras", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "nvidia-nvvm", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { url = "https://files.pythonhosted.org/packages/09/16/9f82c276d711d7b71d418c2f2759dc79635928fc05d23e320f0b59723afb/cuda_tile-1.1.0-cp311-cp311-manylinux2014_x86_64.whl", hash = "sha256:eb75d3caf9555f0b160f009e0c2dd995ccb986e4a766fe4278eedb52d086c89f", size = 187491, upload-time = "2026-01-30T06:34:21.557Z" },
+    { url = "https://files.pythonhosted.org/packages/66/ca/6b4e9e3d16e123ebd304399e4d45d6379cbebdf2da2acc091e5004c5817f/cuda_tile-1.1.0-cp312-cp312-manylinux2014_x86_64.whl", hash = "sha256:35b3e6a9368390339211ed7f1ee3416a829a44d1c1b335ef0df814a6e6ff4902", size = 187946, upload-time = "2026-01-30T06:33:53.716Z" },
+    { url = "https://files.pythonhosted.org/packages/7f/c7/e08882109e672c9d7b6fd980949df07757479254ba86aa8cb1df8741b5a0/cuda_tile-1.1.0-cp313-cp313-manylinux2014_x86_64.whl", hash = "sha256:2758aac91c7c5a9cdacd39c44c2876aa8cb96d72a8a861fbe240c50b5e9ba235", size = 187951, upload-time = "2026-01-30T06:34:09.031Z" },
 ]
 
 [[package]]
@@ -690,7 +686,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "apache-tvm-ffi", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "click", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "cuda-tile", extra = ["tileiras"], marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "cuda-tile", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "einops", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "ninja", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "numpy", version = "2.3.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
@@ -1578,7 +1574,7 @@ wheels = [
 
 [[package]]
 name = "nvidia-cuda-nvcc"
-version = "13.2.86"
+version = "13.0.88"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "nvidia-cuda-crt", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
@@ -1586,7 +1582,7 @@ dependencies = [
     { name = "nvidia-nvvm", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/38/7b/ad9b5f84e8820af24afa8db66b5b2785b9bdc3b8724dffcd5e6ef2d40e53/nvidia_cuda_nvcc-13.2.86-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:7d3f56c8d705bad35bbba69eb0470d90856fd5d4dc48c6a6173aaf1e9f887cf5", size = 44042846, upload-time = "2026-07-16T09:37:47.98Z" },
+    { url = "https://files.pythonhosted.org/packages/71/8b/a546c12881fffeba927d810598987df25d74b8b241788c7db8dfc93b0173/nvidia_cuda_nvcc-13.0.88-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:56fe502eb77625a12f25172caa3cdddb4e4c8ba2c8c17dba44b164761b380f03", size = 37384532, upload-time = "2025-09-04T08:27:37.916Z" },
 ]
 
 [[package]]
@@ -1603,19 +1599,6 @@ version = "13.0.96"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/2e/24/d1558f3b68b1d26e706813b1d10aa1d785e4698c425af8db8edc3dced472/nvidia_cuda_runtime-13.0.96-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:7f82250d7782aa23b6cfe765ecc7db554bd3c2870c43f3d1821f1d18aebf0548", size = 2243632, upload-time = "2025-10-09T08:55:36.117Z" },
-]
-
-[[package]]
-name = "nvidia-cuda-tileiras"
-version = "13.2.86"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "nvidia-cuda-nvcc", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "nvidia-nvjitlink", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "nvidia-nvvm", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/a4/ec/e01bcfe4f48fabd8fd1af139061a74f92f3b71fe3cac8a64e943157c2585/nvidia_cuda_tileiras-13.2.86-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:832f360aa8ce478ff878c4e6630cd767349a597ea54382e7c07a835b0daead96", size = 36970477, upload-time = "2026-07-16T09:44:08.421Z" },
 ]
 
 [[package]]

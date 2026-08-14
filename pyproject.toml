@@ -44,6 +44,10 @@ where = ["src"]
 environments = [
     "sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
+# See docs/dependencies.md — must match nvidia-cuda-runtime/nvrtc's 13.0 line
+constraint-dependencies = [
+    "nvidia-cuda-nvcc==13.0.88",
+]
 
 [dependency-groups]
 dev = [

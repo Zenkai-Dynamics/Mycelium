@@ -2,7 +2,7 @@
 
 Status: **Building now**
 Depends on: nothing (first phase)
-Related: [ADR-0001 — project name](../adr/0001-project-name.md) · [ADR-0002 — node transport model](../adr/0002-node-transport-model.md) · [Phase 0 design rationale](../superpowers/specs/2026-08-12-mycelium-phase0-design.md) · [Dependency & hardware compatibility](../dependencies.md)
+Related: [ADR-0001 — project name](../adr/0001-project-name.md) · [ADR-0002 — node transport model](../adr/0002-node-transport-model.md) · [Phase 0 design rationale](../superpowers/specs/2026-08-12-mycelium-phase0-design.md) · [Dependency & hardware compatibility](../dependencies.md) · [Model choice & vLLM validation](../superpowers/specs/2026-08-14-issue-6-validate-model-vllm-design.md)
 
 ## Goal
 
@@ -34,7 +34,7 @@ One LLM. A small, closed pool of nodes the operator personally controls
 
 - Node registration + heartbeat/health-check against the coordinator
 - Routing a single request to a single healthy node
-- One HF model, chosen to fit comfortably on the smallest node's VRAM (exact model TBD against real hardware specs, not fixed here)
+- One HF model — [`Qwen/Qwen2.5-7B-Instruct`](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct), chosen to fit comfortably on the smallest node's VRAM (~15 GB in bf16, well under a single 48 GB A6000 GPU) and confirmed to serve real completions correctly via `vllm serve` on real target hardware — see [the model-choice design doc](../superpowers/specs/2026-08-14-issue-6-validate-model-vllm-design.md) for the selection rationale and the real-hardware verification
 - A basic client interface to send a prompt and get a completion back
 
 ## Explicitly out of scope
@@ -65,7 +65,8 @@ Phase 0 is done when:
 - **Node network reachability: resolved.** Confirmed against real candidate nodes — neither the VPN-gated lab machines (`a6000`/`h100`, private addresses, unreachable from the public internet by definition) nor the CDAC/IUAC HPC login node (`paramrudra`, a public IP where no port tested other than its SSH port answers from outside) accept inbound connections on an arbitrary port. The node agent dials out to the coordinator and holds the connection open — the BOINC/ngrok/torrent-tracker pattern this doc already anticipated. See [ADR-0002](../adr/0002-node-transport-model.md) for the full investigation and decision.
 - **Outbound egress from node environments is unverified.** All tests so far confirmed inbound unreachability, not that nodes can dial *out* — and `paramrudra`'s evidence covers its login node only, while the HPC compute node that would actually run vLLM commonly has more restricted egress. Needs testing before the dial-out transport is built.
 - **Node auth mechanism is a placeholder.** A shared pre-issued token per node is the working assumption for Phase 0's closed pool, but this hasn't been locked in.
-- **Exact model choice is pending real hardware specs** for the HPC/VPN nodes the operator will use.
+- **Exact model choice: resolved.** `Qwen/Qwen2.5-7B-Instruct` was confirmed to run correctly via `vllm serve` on a real target node (`a6000`, single RTX A6000 GPU, pinned via `CUDA_VISIBLE_DEVICES=0`) — a real prompt returned the correct completion. Getting there also required fixing a real dependency-version drift (`nvidia-cuda-nvcc` vs. `nvidia-cuda-runtime`, now corrected in `pyproject.toml`/`uv.lock`). See [the design doc](../superpowers/specs/2026-08-14-issue-6-validate-model-vllm-design.md) for the full investigation.
+- **vLLM must be started with `VLLM_USE_FLASHINFER_SAMPLER=0`.** A packaging inconsistency in flashinfer's bundled CCCL/cub headers breaks its JIT-compiled sampling kernel (unrelated to the CUDA toolchain fix above) — vLLM's own native-sampler fallback works correctly. Issue #7 (node agent wraps vLLM) needs to set this same environment variable when it starts the vLLM process. See [the design doc](../superpowers/specs/2026-08-14-issue-6-validate-model-vllm-design.md) for the full investigation.
 
 ## Next step
 
