@@ -14,7 +14,7 @@ development environment. It's split into two parts:
 ## Prerequisites
 
 - **git**
-- **Python 3.10 or newer**
+- **Python 3.11 or newer**
 - **[uv](https://docs.astral.sh/uv/getting-started/installation/)** (recommended). If you don't have it:
 
   ```bash
@@ -57,26 +57,23 @@ Works on macOS, Linux, or Windows — no GPU needed.
    .venv/bin/pip install -e .        # Windows: .venv\Scripts\pip install -e .
    ```
 
-3. Verify the install by running all three CLI stubs:
+3. Verify the install. `mycelium-client` is still a stub that just prints
+   its version; `mycelium-node` and `mycelium-coordinator` are real CLIs
+   now (they open a coordinator↔node WebSocket transport — see
+   [ADR-0002](adr/0002-node-transport-model.md)), so instead of running
+   them bare, pass `--help` to confirm the install without requiring
+   connection arguments or blocking:
 
    ```bash
-   .venv/bin/mycelium-node        # Windows: .venv\Scripts\mycelium-node
-   .venv/bin/mycelium-coordinator # Windows: .venv\Scripts\mycelium-coordinator
    .venv/bin/mycelium-client      # Windows: .venv\Scripts\mycelium-client
+   .venv/bin/mycelium-node --help        # Windows: .venv\Scripts\mycelium-node --help
+   .venv/bin/mycelium-coordinator --help # Windows: .venv\Scripts\mycelium-coordinator --help
    ```
 
-   Expected output:
-
-   ```
-   mycelium-node 0.1.0
-   mycelium-coordinator 0.1.0
-   mycelium-client 0.1.0
-   ```
-
-   If you see those three lines, your environment is set up correctly.
-   These are Phase 0 skeleton stubs (see
-   [phase-0-foundation.md](phases/phase-0-foundation.md)) — they don't do
-   anything functional yet beyond confirming they run.
+   `mycelium-client` should print `mycelium-client 0.1.0`; the other two
+   should exit cleanly with a usage message. If you see that, your
+   environment is set up correctly. See each command's own `--help` for
+   its actual usage.
 
 ## Node / GPU setup
 
