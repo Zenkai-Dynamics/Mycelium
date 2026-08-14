@@ -25,6 +25,18 @@ uv export --extra node --no-emit-project -o requirements-node-lock.txt
 
 Never hand-edit either file.
 
+## Installing the node extra
+
+```bash
+uv sync --extra node
+```
+
+No `uv`? Install from the plain-pip fallback lockfile instead:
+
+```bash
+pip install -r requirements-node-lock.txt
+```
+
 ## Hardware requirements
 
 - **CUDA:** 13.0 — not vLLM's own generic install-page default (12.9). `torch==2.11.0`, pulled in transitively by `vllm[audio]==0.25.1`, resolves to `cuda-toolkit==13.0.2` and the `-cu13` variants of cuDNN/NCCL/cuSPARSELt/NVSHMEM in `uv.lock` — the locked stack is CUDA 13, not 12.9. Verify against `uv.lock`'s `cuda-toolkit` entry if these pins are ever regenerated, since the generic vLLM docs describe vLLM's own release wheel, not what this project's resolver actually pulls in.
