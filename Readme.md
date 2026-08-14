@@ -48,6 +48,7 @@ Worth being aware of, not treated as a dependency: **Petals** (BigScience) has a
 - `docs/phases/` — one doc per phase (linked above), the living source of truth for that phase's scope, architecture, and open questions. Update these in place as each phase is actually built, rather than treating this Readme as the record.
 - `docs/adr/` — architecture decision records (e.g. the project name).
 - `docs/superpowers/specs/` — dated design-session records, capturing *why* a decision was made at the time, left as-written rather than updated.
+- `docs/dependencies.md` — pinned dependency versions and the CUDA/driver/GPU hardware compatibility they assume. Update in place as pins change.
 
 ---
 
