@@ -1,13 +1,19 @@
 """Tests for mycelium.node.vllm_process."""
 
 import json
+import os
+import sys
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from threading import Thread
 
 import pytest
 
 from mycelium.node import vllm_process
 from mycelium.node.vllm_process import VLLMProcess, VLLMReadyTimeout
+
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
 def test_build_command():
@@ -81,3 +87,39 @@ def test_complete_returns_completion_content(fake_vllm_server):
     process = VLLMProcess(port=port)
     result = process.complete("What is the answer?")
     assert result == "the answer is 42"
+
+
+def _process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def test_start_stop_kills_process_group_with_no_orphans(tmp_path):
+    pid_file = tmp_path / "pid"
+    child_pid_file = tmp_path / "child_pid"
+    port = 39998
+    command = [
+        sys.executable,
+        str(FIXTURES_DIR / "fake_vllm.py"),
+        str(port),
+        str(pid_file),
+        str(child_pid_file),
+    ]
+
+    process = VLLMProcess(port=port)
+    process.start(command=command)
+    try:
+        process.wait_ready(timeout=10.0)
+        parent_pid = int(pid_file.read_text())
+        child_pid = int(child_pid_file.read_text())
+        assert _process_alive(parent_pid)
+        assert _process_alive(child_pid)
+    finally:
+        process.stop()
+
+    time.sleep(0.5)  # give the OS a moment to reap the killed processes
+    assert not _process_alive(parent_pid)
+    assert not _process_alive(child_pid)

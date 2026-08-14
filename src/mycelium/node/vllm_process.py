@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import os
+import signal
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -22,6 +24,7 @@ HEALTH_POLL_INTERVAL_SECONDS = 1.0
 HEALTH_REQUEST_TIMEOUT_SECONDS = 2.0
 READY_TIMEOUT_SECONDS = 300.0  # vLLM model load can take a while
 COMPLETE_TIMEOUT_SECONDS = 120.0
+STOP_TIMEOUT_SECONDS = 15.0
 
 
 def build_command(model: str, port: int) -> list[str]:
@@ -56,6 +59,30 @@ class VLLMProcess:
         self.model = model
         self.gpu = gpu
         self.port = port
+        self._process: subprocess.Popen | None = None
+
+    def start(self, command: list[str] | None = None) -> None:
+        """Launch `vllm serve` in its own process group (so stop() can kill
+        its worker subprocesses too, not just this one PID)."""
+        self._process = subprocess.Popen(
+            command or build_command(self.model, self.port),
+            env=build_env(self.gpu),
+            start_new_session=True,
+        )
+
+    def stop(self, timeout: float = STOP_TIMEOUT_SECONDS) -> None:
+        """SIGTERM the whole process group, escalating to SIGKILL if it
+        doesn't exit in time. No-op if start() was never called or the
+        process already exited."""
+        if self._process is None or self._process.poll() is not None:
+            return
+        pgid = os.getpgid(self._process.pid)
+        os.killpg(pgid, signal.SIGTERM)
+        try:
+            self._process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            os.killpg(pgid, signal.SIGKILL)
+            self._process.wait()
 
     def wait_ready(self, timeout: float = READY_TIMEOUT_SECONDS) -> None:
         """Poll /health until vLLM responds 200, or raise VLLMReadyTimeout."""
