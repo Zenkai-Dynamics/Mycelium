@@ -27,8 +27,8 @@ Never hand-edit either file.
 
 ## Hardware requirements
 
-- **CUDA:** 12.9 — the version `vllm==0.25.1` / `ray==2.57.0`'s prebuilt wheels target by default.
-- **Minimum NVIDIA driver:** 550.54.14 (Linux).
+- **CUDA:** 13.0 — not vLLM's own generic install-page default (12.9). `torch==2.11.0`, pulled in transitively by `vllm[audio]==0.25.1`, resolves to `cuda-toolkit==13.0.2` and the `-cu13` variants of cuDNN/NCCL/cuSPARSELt/NVSHMEM in `uv.lock` — the locked stack is CUDA 13, not 12.9. Verify against `uv.lock`'s `cuda-toolkit` entry if these pins are ever regenerated, since the generic vLLM docs describe vLLM's own release wheel, not what this project's resolver actually pulls in.
+- **Minimum NVIDIA driver:** 580.65.06 (Linux) — the floor for CUDA 13.0 per NVIDIA's CUDA Toolkit 13.0 release notes.
 - **GPU compute capability:** ≥ 7.5 required. Checked against Phase 0's candidate node types:
   - NVIDIA A6000 — compute capability 8.6 ✓
   - NVIDIA A100 — compute capability 8.0 ✓
@@ -42,7 +42,7 @@ Never hand-edit either file.
 `training-framework` allocation, reachable over the university VPN):
 
 - GPU: 4× NVIDIA RTX A6000
-- Driver: 580.173.02 (Linux) — comfortably above the 550.54.14 minimum
+- Driver: 580.173.02 (Linux) — above the 580.65.06 minimum, though only by a patch version; a driver clearing 580.65.06 by a wider margin is worth preferring for future nodes if there's a choice
 - Compute capability: 8.6, matching the table above
 
 `pyproject.toml` and `uv.lock` were copied to the node and
@@ -50,11 +50,32 @@ Never hand-edit either file.
 (`--no-install-project` skips building the local `mycelium` package
 itself, which wasn't copied — this run verifies only the third-party
 `node` extra stack, per this issue's scope). The resulting virtualenv's
-interpreter confirmed the installed versions match the pins exactly:
+interpreter confirmed the installed versions, that the specific module
+the `ray[llm]`/`vllm` pairing exists for imports cleanly, and that PyTorch
+sees the GPUs and reports the CUDA build the "Hardware requirements"
+section above documents:
 
 ```
-$ .venv/bin/python3 -c "import ray, vllm; print(ray.__version__, vllm.__version__)"
-2.57.0 0.25.1
+$ .venv/bin/python3 -c "
+import ray, vllm, torch
+import ray.serve.llm
+print('ray:', ray.__version__)
+print('vllm:', vllm.__version__)
+print('ray.serve.llm imported OK:', ray.serve.llm.__name__)
+print('torch:', torch.__version__)
+print('torch.version.cuda:', torch.version.cuda)
+print('torch.cuda.is_available():', torch.cuda.is_available())
+print('torch.cuda.device_count():', torch.cuda.device_count())
+print('torch.cuda.get_device_name(0):', torch.cuda.get_device_name(0))
+"
+ray: 2.57.0
+vllm: 0.25.1
+ray.serve.llm imported OK: ray.serve.llm
+torch: 2.11.0+cu130
+torch.version.cuda: 13.0
+torch.cuda.is_available(): True
+torch.cuda.device_count(): 4
+torch.cuda.get_device_name(0): NVIDIA RTX A6000
 ```
 
 (Using the venv's interpreter directly rather than `uv run` — `uv run`
@@ -64,3 +85,16 @@ only `pyproject.toml`/`uv.lock` are present without `src/`. Not a problem
 with the pinned dependencies themselves; a full checkout on a node
 running the actual node agent — e.g. via `git clone` — installs the
 project too and won't hit this.)
+
+**Bare-pip fallback path also verified.** `requirements-node-lock.txt`
+was copied to the same node and installed into a separate, independently
+created virtualenv with plain `pip` (not `uv`):
+
+```
+$ python3 -m venv pipvenv   # (this node's system venv module lacked ensurepip;
+                             #  uv venv --seed pipvenv was used instead, which
+                             #  behaves identically for this purpose)
+$ ./pipvenv/bin/pip install -r requirements-node-lock.txt
+$ ./pipvenv/bin/python3 -c "import ray, vllm; print(ray.__version__, vllm.__version__)"
+2.57.0 0.25.1
+```
