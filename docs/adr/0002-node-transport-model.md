@@ -32,7 +32,7 @@ would have silently tested from inside the university network instead.
 
 | Target | Port | Result | Interpretation |
 |---|---|---|---|
-| `192.168.22.23` (`a6000`, IIITD lab GPU machine) | 22 (SSH) | `nc -zv`: **timed out** | Private RFC1918 address — unroutable from the public internet by definition, and confirmed directly. |
+| `192.168.22.23` (`a6000`, IIITD lab GPU machine); `h100` shares the same private-VPN-only network posture at `192.168.3.215` | 22 (SSH) | `nc -zv`: **timed out** | Private RFC1918 address — unroutable from the public internet by definition, and confirmed directly. |
 | `paramrudra.iuac.res.in` (`14.139.62.247`) (IUAC/CDAC HPC login node) | 4422 (SSH) | `nc -zv` / real `ssh`: **succeeded immediately** | SSH is open to the general internet on this one specific port. |
 | `paramrudra.iuac.res.in` (`14.139.62.247`) | 8022 (test listener — independently confirmed bound: `ss -tlnp` showed `LISTEN 0.0.0.0:8022`; a local `curl` returned `200`) | `nc -zv` / `curl`: **timed out**, not refused | A silent drop, not an OS-level rejection — consistent with a stateful firewall allow-listing only port 4422 and dropping everything else. |
 
@@ -47,9 +47,9 @@ open. The coordinator never initiates a connection to a node.**
 
 Neither candidate environment allows a coordinator to dial into a node on
 an arbitrary port: `a6000`/`h100` are unreachable by address alone (private
-IPs, VPN-only), and `paramrudra` is unreachable on anything but its one
-allow-listed SSH port — which is the institution's for interactive login,
-not a port Mycelium's transport could claim. Both point to the same
+IPs, VPN-only), and on `paramrudra`, no port we tested other than 4422
+(SSH) answers — that port is the institution's for interactive login, not
+a port Mycelium's transport could claim. Both point to the same
 architecture, matching the BOINC/ngrok/torrent-tracker pattern
 `docs/phases/phase-0-foundation.md` already named as the likely outcome.
 
@@ -62,15 +62,23 @@ architecture, matching the BOINC/ngrok/torrent-tracker pattern
 - The node agent needs outbound-only network access, plus a reconnect/
   keepalive strategy for its held connection — a Phase 0 implementation
   detail for whichever ticket builds the transport, not decided here.
+- Outbound egress from the node environments was assumed, not tested —
+  every reachability test run here was inbound (coordinator dialing into
+  a node), not the converse. In particular, all `paramrudra` evidence
+  covers its login node only; the machine that would actually run vLLM is
+  an HPC compute node behind it, and compute nodes commonly have more
+  restricted (sometimes proxy-only or no) internet egress than their
+  login node. This should be verified before the dial-out transport is
+  actually built.
 - This holds regardless of which specific nodes join later: the
   underlying reason (institutional firewalls default to deny-inbound;
   lab machines sit behind VPN-only private addressing) is structural, not
   particular to `a6000`/`h100`/`paramrudra` — a safe general assumption
   for Phase 0's whole node pool.
 - Consistent with `docs/phases/phase-0-foundation.md`'s user story #5
-  ("Phase 0's architecture should not paint Phase 1 into a corner") —
-  dial-out is exactly the BOINC/ngrok pattern already named there as the
-  Phase 1-compatible approach.
+  ("I want Phase 0's architecture to not paint Phase 1 (public nodes)
+  into a corner") — dial-out is exactly the BOINC/ngrok pattern already
+  named there as the Phase 1-compatible approach.
 - Out of scope here: actually implementing the dial-out transport (the
   node-side connection-holding client, the coordinator-side listener that
   accepts and tracks those connections) — a later Phase 0 ticket.
