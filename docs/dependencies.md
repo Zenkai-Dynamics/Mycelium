@@ -42,7 +42,7 @@ Never hand-edit either file.
 `training-framework` allocation, reachable over the university VPN):
 
 - GPU: 4× NVIDIA RTX A6000
-- Driver: 580.173.02 (Linux) — above the 580.65.06 minimum, though only by a patch version; a driver clearing 580.65.06 by a wider margin is worth preferring for future nodes if there's a choice
+- Driver: 580.173.02 (Linux) — above the 580.65.06 minimum
 - Compute capability: 8.6, matching the table above
 
 `pyproject.toml` and `uv.lock` were copied to the node and
