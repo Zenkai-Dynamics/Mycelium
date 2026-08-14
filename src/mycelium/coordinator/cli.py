@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 from pathlib import Path
 
 from mycelium import __version__
@@ -42,12 +43,16 @@ async def _run(args: argparse.Namespace) -> None:
             )
         certs.ensure_cert(args.cert_file, args.key_file, args.cert_san_ip)
 
-    print(f"mycelium-coordinator {__version__} listening on {args.host}:{args.port}")
+    print(
+        f"mycelium-coordinator {__version__} listening on {args.host}:{args.port}",
+        flush=True,
+    )
     async with server.serve(args.host, args.port, args.cert_file, args.key_file):
         await asyncio.Future()  # run forever
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO)
     args = parse_args()
     asyncio.run(_run(args))
 

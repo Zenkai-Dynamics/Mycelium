@@ -57,3 +57,8 @@ async def test_node_connects_survives_a_ping_cycle_and_reconnects_after_drop(tmp
     await coordinator2.wait_closed()
 
     assert connect_count == 2, f"expected exactly 2 connect attempts, got {connect_count}"
+
+
+def test_server_and_connection_agree_on_keepalive_settings():
+    assert server.PING_INTERVAL_SECONDS == connection.PING_INTERVAL_SECONDS
+    assert server.PING_TIMEOUT_SECONDS == connection.PING_TIMEOUT_SECONDS

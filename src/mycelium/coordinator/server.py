@@ -19,7 +19,10 @@ PING_TIMEOUT_SECONDS = 20
 
 async def _handle_node(websocket) -> None:
     """Hold a node's connection open. No business logic yet — see module docstring."""
-    async for _message in websocket:
+    try:
+        async for _message in websocket:
+            pass
+    except websockets.exceptions.ConnectionClosed:
         pass
 
 

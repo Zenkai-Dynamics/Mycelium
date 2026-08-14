@@ -55,3 +55,21 @@ async def test_connection_with_wrong_pinned_cert_is_rejected(tmp_path):
                 assert False, "expected connection to be rejected"
         except ssl.SSLCertVerificationError:
             pass
+
+
+async def test_server_survives_abnormal_disconnect(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve("127.0.0.1", 8984, cert_path, key_path):
+        client_ctx = _client_ssl_context(cert_path)
+        ws = await websockets.connect("wss://127.0.0.1:8984", ssl=client_ctx)
+        assert ws.state.name == "OPEN"
+        # Forcibly tear down the transport instead of a clean close handshake,
+        # to simulate a node being killed / network drop.
+        ws.transport.close()
+
+        # The server must still be accepting new connections afterward.
+        async with websockets.connect("wss://127.0.0.1:8984", ssl=client_ctx) as ws2:
+            assert ws2.state.name == "OPEN"

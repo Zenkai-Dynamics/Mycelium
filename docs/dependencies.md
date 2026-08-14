@@ -52,7 +52,7 @@ pip install -r requirements-node-lock.txt
   - NVIDIA A6000 — compute capability 8.6 ✓
   - NVIDIA A100 — compute capability 8.0 ✓
   - NVIDIA H100 — compute capability 9.0 ✓
-- **Python:** 3.10–3.14 (vLLM 0.25.1's supported range), within the project's existing `>=3.10` floor.
+- **Python:** 3.10–3.14 (vLLM 0.25.1's supported range), within the project's existing `>=3.11` floor.
 - **OS / architecture:** Linux, x86_64 only. `uv.lock` is generated for `sys_platform == 'linux' and platform_machine == 'x86_64'` specifically (see `[tool.uv].environments` in `pyproject.toml`) — it will not resolve or install on macOS/Windows dev machines by design, since Phase 0 nodes are Linux HPC/VPN machines only.
 
 ## Real-hardware verification

@@ -1,6 +1,7 @@
 """Tests for mycelium.coordinator.certs."""
 
 import ipaddress
+import stat
 
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
@@ -54,3 +55,12 @@ def test_key_matches_cert_public_key(tmp_path):
     key = serialization.load_pem_private_key(key_path.read_bytes(), password=None)
 
     assert cert.public_key().public_numbers() == key.public_key().public_numbers()
+
+
+def test_key_file_has_restrictive_permissions(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+
+    ensure_cert(cert_path, key_path, "20.244.2.48")
+
+    assert stat.S_IMODE(key_path.stat().st_mode) == 0o600

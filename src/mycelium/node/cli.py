@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 from pathlib import Path
 
 from mycelium import __version__
@@ -18,17 +19,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 async def _run(args: argparse.Namespace) -> None:
-    print(f"mycelium-node {__version__} connecting to {args.coordinator_url}")
+    print(f"mycelium-node {__version__} connecting to {args.coordinator_url}", flush=True)
     async for websocket in connection.connect(args.coordinator_url, args.coordinator_cert):
-        print(f"connected to coordinator ({args.coordinator_url})")
+        print(f"connected to coordinator ({args.coordinator_url})", flush=True)
         try:
             await websocket.wait_closed()
-            print("connection to coordinator closed, reconnecting...")
+            print("connection to coordinator closed, reconnecting...", flush=True)
         except Exception:
             continue
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO)
     args = parse_args()
     asyncio.run(_run(args))
 

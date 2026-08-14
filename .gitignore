@@ -395,3 +395,6 @@ Cargo.lock
 # End of https://www.toptal.com/developers/gitignore/api/python,django,rust,goland
 # Added by code-review-graph
 .code-review-graph/
+
+# generated TLS certs/keys — never commit
+*.pem

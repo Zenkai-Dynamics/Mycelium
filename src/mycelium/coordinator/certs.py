@@ -59,3 +59,4 @@ def ensure_cert(cert_path: Path, key_path: Path, ip: str) -> None:
             encryption_algorithm=serialization.NoEncryption(),
         )
     )
+    key_path.chmod(0o600)
