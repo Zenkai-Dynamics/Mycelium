@@ -38,7 +38,29 @@ Never hand-edit either file.
 
 ## Real-hardware verification
 
-Not yet run. This section will record: the date, which real node (GPU
-model, driver version) `uv sync --extra node` (or the
-`requirements-node-lock.txt` fallback) was installed on, and confirmation
-that the installed `ray`/`vllm` versions match the pins above.
+**Verified 2026-08-14** against a real Phase 0 candidate node (IIIT-D
+`training-framework` allocation, reachable over the university VPN):
+
+- GPU: 4× NVIDIA RTX A6000
+- Driver: 580.173.02 (Linux) — comfortably above the 550.54.14 minimum
+- Compute capability: 8.6, matching the table above
+
+`pyproject.toml` and `uv.lock` were copied to the node and
+`uv sync --extra node --no-install-project` completed successfully
+(`--no-install-project` skips building the local `mycelium` package
+itself, which wasn't copied — this run verifies only the third-party
+`node` extra stack, per this issue's scope). The resulting virtualenv's
+interpreter confirmed the installed versions match the pins exactly:
+
+```
+$ .venv/bin/python3 -c "import ray, vllm; print(ray.__version__, vllm.__version__)"
+2.57.0 0.25.1
+```
+
+(Using the venv's interpreter directly rather than `uv run` — `uv run`
+performs its own project sync by default and tries to build the local
+`mycelium` package, which fails with `ModuleNotFoundError: mycelium` when
+only `pyproject.toml`/`uv.lock` are present without `src/`. Not a problem
+with the pinned dependencies themselves; a full checkout on a node
+running the actual node agent — e.g. via `git clone` — installs the
+project too and won't hit this.)
