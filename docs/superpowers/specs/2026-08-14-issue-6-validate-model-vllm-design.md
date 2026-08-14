@@ -100,14 +100,18 @@ extra (`uv sync --extra node`, per
 [docs/dependencies.md](../../dependencies.md)) so the exact pinned stack
 gets validated, not some other vLLM version installed ad hoc.
 
-**Model storage: `HF_HOME` redirected to `/mnt/disk1/mycelium-hf-cache`.**
+**Model storage: `HF_HOME` redirected to `/mnt/disk1/Framework/mycelium-hf-cache`.**
 `a6000`'s root disk is already at 95% full (51 GB free) and is a machine
 shared with several other users/projects — downloading ~15 GB of model
 weights there would work today but leaves little margin and tightens a
-disk other people also depend on. `/mnt/disk1` has 269 GB free and
-already hosts other projects' data on this box; a dedicated
-`mycelium-hf-cache` subdirectory there keeps this project's footprint
-contained and out of the tight root disk entirely.
+disk other people also depend on. `/mnt/disk1` itself is `root`-owned
+(`drwxr-xr-x`) and not writable by the operator's account directly — but
+`/mnt/disk1/Framework` (world-writable, and clearly the operator's own
+prior working directory: it contains `Bhaskera.txt`, the same prior
+framework named in `docs/phases/phase-0-foundation.md`'s architecture
+section) already exists and is writable, so the cache lives at
+`/mnt/disk1/Framework/mycelium-hf-cache` rather than needing `sudo` for a
+new top-level directory.
 
 **Verification: the OpenAI-compatible `/v1/chat/completions` endpoint,**
 not the raw `/v1/completions` endpoint — matches how an Instruct-tuned
@@ -119,6 +123,110 @@ would eventually talk to.
 rather than an architectural decision — issue #6's acceptance criteria
 only asks for the `docs/phases/phase-0-foundation.md` update, and that's
 sufficient here.
+
+## Live verification & debugging
+
+Running `vllm serve Qwen/Qwen2.5-7B-Instruct` for real on `a6000` did not
+work on the first attempt — it took real root-cause debugging (via the
+systematic-debugging process: read the error, form a hypothesis, test it
+minimally, verify or move to a new hypothesis) across two distinct bugs
+before a prompt actually returned a completion. This section is the
+record, so the fixes aren't lost and don't need rediscovering.
+
+**Attempt 1 — system nvcc, wrong CUDA generation entirely.** The `node`
+extra installed cleanly (`uv sync --extra node`, matching issue #2's
+already-pinned `ray[llm]==2.57.0`/`vllm[audio]==0.25.1`). `vllm serve`
+started, but failed while JIT-compiling a `flashinfer` sampling kernel:
+
+```
+error: class "cub::_V_300302_SM_860::BlockAdjacentDifference<__nv_bool, 512, 1, 1>" has no member "FlagHeads"
+```
+
+The compile command showed `nvcc` resolving to `/usr/bin/nvcc` — the
+machine's system-wide CUDA toolkit, version **12.0** (from January
+2023) — while the project's pinned `torch==2.11.0` needs CUDA **13**
+(`torch.version.cuda == "13.0"`, already documented in
+`docs/dependencies.md`). The venv itself has its own bundled CUDA 13
+`nvcc` (`nvidia-cuda-nvcc` pip package), never on `PATH` by default.
+
+**Attempt 2 — venv's own nvcc, but internally mismatched.** Forcing
+`PATH`/`CUDA_HOME` to the venv's own CUDA 13 `nvcc` got much further —
+the model loaded, CUDA graphs captured successfully, the server started —
+but crashed on the *first real sampling call* with a different error:
+
+```
+error: "CUDA compiler and CUDA toolkit headers are incompatible, please check your include paths"
+```
+
+Root-caused precisely: the venv's `nvcc` reports itself as version
+**13.2** (`__CUDACC_VER_MAJOR__.MINOR__`), but the `cuda_runtime_api.h`
+it resolves against (from the separately-versioned `nvidia-cuda-runtime`
+pip package) defines `CUDART_VERSION 13000` (13.0) — two different
+NVIDIA CUDA sub-packages, resolved independently by `uv`'s resolver with
+nothing forcing them to share a release line. **This drift existed in
+the project's own committed `uv.lock`**, not just this manual PATH
+experiment: `nvidia-cuda-nvcc` was pinned to `13.2.86` (pulled in via
+`cuda-tile`'s `tileiras` extra, itself a transitive dependency with no
+version ceiling tying it to the rest of the CUDA 13.0.x stack), while
+`nvidia-cuda-runtime`/`nvidia-cuda-nvrtc` sat at `13.0.9x`/`13.0.88`.
+**Fix:** added `[tool.uv].constraint-dependencies =
+["nvidia-cuda-nvcc==13.0.88"]` to `pyproject.toml` — matching
+`nvidia-cuda-nvrtc`'s already-pinned `13.0.88` — and regenerated
+`uv.lock`/`requirements-node-lock.txt`. This is a genuine, permanent
+correction to the dependency stack pinned in issue #2, not scoped to
+this issue alone; anyone installing `mycelium[node]` fresh would have
+hit the same `FlagHeads` JIT-compile failure the moment `vllm serve`
+actually tried to sample a token (issue #2's own verification never
+exercised this path — it only checked `import ray, vllm` and
+`ray.serve.llm`, not a real serve+sample call).
+
+**Attempt 3 — aligned toolchain, same `FlagHeads` error resurfaces.**
+With `nvidia-cuda-nvcc`/`nvidia-cuda-runtime` now aligned to the same
+13.0.x line (no manual `PATH` override needed — `uv sync` alone now
+resolves a self-consistent toolchain), the *original* `FlagHeads` error
+came back, unchanged. This ruled out "CUDA toolkit version" as the cause
+of `FlagHeads` specifically — the error is independent of which
+internally-consistent CUDA generation compiles it. Traced further:
+`flashinfer`'s own bundled CCCL/`cub` copy
+(`flashinfer/data/cccl/cub`, `CUB_VERSION 300302` — matching the exact
+`_V_300302_SM_860` namespace in the error) genuinely *does* define
+`FlagHeads` on `BlockAdjacentDifference` at the source level, confirmed
+by reading the header directly — yet the compiler still reports it
+missing. The CUDA 13 toolkit package (`nvidia-cuda-nvcc`) also ships its
+own bundled CCCL copy at a different, competing location
+(`nvidia/cu13/include/cccl/cub`), and nvcc's own implicit/built-in header
+search can pull from it independently of `flashinfer`'s explicit `-I`
+flags — an internal inconsistency inside `flashinfer==0.6.13`'s own
+packaging (or its interaction with a CUDA-13-toolkit-bundled CCCL), not
+something this project's own pins control.
+
+**Resolution: `VLLM_USE_FLASHINFER_SAMPLER=0`.** Rather than continue
+root-causing a packaging inconsistency inside a third-party dependency's
+bundled C++ headers — well outside this issue's scope, and outside what
+this project's own pins can fix — `vllm`'s own `envs.py` already defines
+`VLLM_USE_FLASHINFER_SAMPLER` (default `True`) specifically to fall back
+to a native, pure-PyTorch top-k/top-p sampler
+(`vllm/v1/sample/ops/topk_topp_sampler.py`) when the accelerated
+`flashinfer` path isn't usable. This is a real, supported vLLM code path
+(not a workaround invented here), and issue #6's acceptance criteria is
+about vLLM serving working and returning correct completions — not about
+`flashinfer`'s specific fused-kernel sampling throughput. Setting
+`VLLM_USE_FLASHINFER_SAMPLER=0` let the server start and serve cleanly.
+
+**Final verified result**, `CUDA_VISIBLE_DEVICES=0`,
+`HF_HOME=/mnt/disk1/Framework/mycelium-hf-cache`,
+`VLLM_USE_FLASHINFER_SAMPLER=0`:
+
+- `vllm serve Qwen/Qwen2.5-7B-Instruct --port 8811` → `Application startup complete`, all OpenAI-compatible routes registered including `/v1/chat/completions`.
+- Prompt 1: *"What is the capital of France? Answer in one word."* → **`"Paris"`**.
+- Prompt 2: *"What is 12 times 7? Answer with only the number."* → **`"84"`**.
+- `nvidia-smi` during serving: GPU 0 (the pinned device) at 45640/49140 MiB used; GPUs 1–3 at 4 MiB (idle) — confirms single-GPU pinning worked exactly as designed, not an accidental multi-GPU spread.
+
+**`VLLM_USE_FLASHINFER_SAMPLER=0` is a known limitation to carry
+forward**, not silently absorbed: issue #7 (node agent wraps vLLM) will
+need to set this same environment variable when it starts the vLLM
+process, until/unless the underlying `flashinfer`/CCCL packaging issue is
+independently resolved upstream or by a future dependency-pin change.
 
 ## Explicitly out of scope for this issue
 

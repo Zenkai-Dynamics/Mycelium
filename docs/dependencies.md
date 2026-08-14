@@ -13,6 +13,23 @@ assume. See the design doc above for the reasoning behind each choice.
 | `ray[llm]` | 2.57.0 | Latest stable Ray release (as of 2026-08-14). |
 | `vllm[audio]` | 0.25.1 | Not vLLM's own latest release (0.27.1) — `ray[llm]==2.57.0` hard-pins `vllm[audio]==0.25.1` internally so that `ray.serve.llm` works correctly, so vLLM is pinned to match rather than independently. |
 
+**Transitive constraint: `nvidia-cuda-nvcc==13.0.88`** (`[tool.uv].constraint-dependencies`
+in `pyproject.toml`, not a direct dependency — `mycelium` itself never
+imports `nvcc`). Without this, `uv`'s resolver independently picks
+`nvidia-cuda-nvcc` at whatever its own latest-compatible version is
+(observed: `13.2.86`, pulled in via `cuda-tile`'s unconstrained
+`tileiras` extra) while `nvidia-cuda-runtime`/`nvidia-cuda-nvrtc` resolve
+separately to the `13.0.x` line `torch==2.11.0` actually needs — two
+NVIDIA CUDA sub-packages drifting to different point releases with
+nothing forcing them to match. That drift breaks `flashinfer`'s JIT
+kernel compilation (used by vLLM's accelerated sampler) the moment a
+served model actually samples a token — `import ray, vllm` alone never
+exercises this path, which is why issue #2's original verification
+missed it. `13.0.88` matches `nvidia-cuda-nvrtc`'s already-resolved
+version. Found and fixed during issue #6's real-hardware validation —
+full debugging narrative in
+[the issue #6 design doc](superpowers/specs/2026-08-14-issue-6-validate-model-vllm-design.md).
+
 ## Pinned versions (`mycelium` base / `mycelium[coordinator]`)
 
 | Package | Version | Why this exact version |
@@ -117,3 +134,27 @@ $ ./pipvenv/bin/pip install -r requirements-node-lock.txt
 $ ./pipvenv/bin/python3 -c "import ray, vllm; print(ray.__version__, vllm.__version__)"
 2.57.0 0.25.1
 ```
+
+**Real model-serving verification (2026-08-14, issue #6).** The
+2026-08-14 verification above only imported `ray`/`vllm` — it never
+actually served a model or sampled a token. Doing so on the same `a6000`
+node surfaced the `nvidia-cuda-nvcc` drift documented above (found via
+real root-cause debugging, not assumed) and a separate `flashinfer`/CCCL
+packaging inconsistency requiring `VLLM_USE_FLASHINFER_SAMPLER=0` (vLLM's
+own supported native-sampler fallback — see the issue #6 design doc for
+the full investigation). With both addressed:
+
+```
+$ CUDA_VISIBLE_DEVICES=0 VLLM_USE_FLASHINFER_SAMPLER=0 \
+  HF_HOME=/mnt/disk1/Framework/mycelium-hf-cache \
+  vllm serve Qwen/Qwen2.5-7B-Instruct --port 8811
+...
+INFO:     Application startup complete.
+
+$ curl http://localhost:8811/v1/chat/completions -d '{"model": "Qwen/Qwen2.5-7B-Instruct",
+  "messages": [{"role": "user", "content": "What is the capital of France? Answer in one word."}]}'
+# → "Paris"
+```
+
+`nvidia-smi` during serving confirmed single-GPU pinning: GPU 0 (the
+pinned device) at 45640/49140 MiB used, GPUs 1–3 at 4 MiB (idle).
