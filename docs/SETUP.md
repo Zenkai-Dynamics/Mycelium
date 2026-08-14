@@ -14,7 +14,7 @@ development environment. It's split into two parts:
 ## Prerequisites
 
 - **git**
-- **Python 3.10 or newer**
+- **Python 3.11 or newer**
 - **[uv](https://docs.astral.sh/uv/getting-started/installation/)** (recommended). If you don't have it:
 
   ```bash
