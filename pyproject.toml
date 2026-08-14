@@ -44,6 +44,9 @@ where = ["src"]
 environments = [
     "sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
+constraint-dependencies = [
+    "nvidia-cuda-nvcc==13.0.88",
+]
 
 [dependency-groups]
 dev = [

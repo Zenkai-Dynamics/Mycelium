@@ -239,10 +239,10 @@ cuda-python==13.3.1 ; platform_machine == 'x86_64' and sys_platform == 'linux' \
     # via
     #   nvidia-cutlass-dsl-libs-base
     #   nvidia-cutlass-dsl-libs-cu13
-cuda-tile==1.3.0 ; platform_machine == 'x86_64' and sys_platform == 'linux' \
-    --hash=sha256:2888d6b89fae053a53ca7bb703c508a5cf90671d266934573c5b6c25978022c4 \
-    --hash=sha256:a44a81e255fdb7bf8e1f7511fe3a019e6045024574509ea8548e0f71f25f8473 \
-    --hash=sha256:e4865acbff1172aaee304bf9c550586088d8b4545a384423597a590899386709
+cuda-tile==1.1.0 ; platform_machine == 'x86_64' and sys_platform == 'linux' \
+    --hash=sha256:2758aac91c7c5a9cdacd39c44c2876aa8cb96d72a8a861fbe240c50b5e9ba235 \
+    --hash=sha256:35b3e6a9368390339211ed7f1ee3416a829a44d1c1b335ef0df814a6e6ff4902 \
+    --hash=sha256:eb75d3caf9555f0b160f009e0c2dd995ccb986e4a766fe4278eedb52d086c89f
     # via flashinfer-python
 cuda-toolkit==13.0.2 ; platform_machine == 'x86_64' and sys_platform == 'linux' \
     --hash=sha256:b198824cf2f54003f50d64ada3a0f184b42ca0846c1c94192fa269ecd97a66eb
@@ -814,12 +814,9 @@ nvidia-cuda-crt==13.3.73 ; platform_machine == 'x86_64' and sys_platform == 'lin
 nvidia-cuda-cupti==13.0.85 ; platform_machine == 'x86_64' and sys_platform == 'linux' \
     --hash=sha256:4eb01c08e859bf924d222250d2e8f8b8ff6d3db4721288cf35d14252a4d933c8
     # via cuda-toolkit
-nvidia-cuda-nvcc==13.2.86 ; platform_machine == 'x86_64' and sys_platform == 'linux' \
-    --hash=sha256:7d3f56c8d705bad35bbba69eb0470d90856fd5d4dc48c6a6173aaf1e9f887cf5
-    # via
-    #   cuda-tile
-    #   humming-kernels
-    #   nvidia-cuda-tileiras
+nvidia-cuda-nvcc==13.0.88 ; platform_machine == 'x86_64' and sys_platform == 'linux' \
+    --hash=sha256:56fe502eb77625a12f25172caa3cdddb4e4c8ba2c8c17dba44b164761b380f03
+    # via humming-kernels
 nvidia-cuda-nvrtc==13.0.88 ; platform_machine == 'x86_64' and sys_platform == 'linux' \
     --hash=sha256:ad9b6d2ead2435f11cbb6868809d2adeeee302e9bb94bcf0539c7a40d80e8575
     # via
@@ -831,9 +828,6 @@ nvidia-cuda-runtime==13.0.96 ; platform_machine == 'x86_64' and sys_platform == 
     #   cuda-toolkit
     #   humming-kernels
     #   nvidia-cuda-nvcc
-nvidia-cuda-tileiras==13.2.86 ; platform_machine == 'x86_64' and sys_platform == 'linux' \
-    --hash=sha256:832f360aa8ce478ff878c4e6630cd767349a597ea54382e7c07a835b0daead96
-    # via cuda-tile
 nvidia-cudnn-cu13==9.19.0.56 ; platform_machine == 'x86_64' and sys_platform == 'linux' \
     --hash=sha256:d20e1734305e9d68889a96e3f35094d733ff1f83932ebe462753973e53a572bf
     # via torch
@@ -902,7 +896,6 @@ nvidia-nvjitlink==13.0.88 ; platform_machine == 'x86_64' and sys_platform == 'li
     --hash=sha256:13a74f429e23b921c1109976abefacc69835f2f433ebd323d3946e11d804e47b
     # via
     #   cuda-toolkit
-    #   nvidia-cuda-tileiras
     #   nvidia-cufft
     #   nvidia-cusolver
     #   nvidia-cusparse
@@ -914,10 +907,7 @@ nvidia-nvtx==13.0.85 ; platform_machine == 'x86_64' and sys_platform == 'linux' 
     # via cuda-toolkit
 nvidia-nvvm==13.2.86 ; platform_machine == 'x86_64' and sys_platform == 'linux' \
     --hash=sha256:a9244f3209922d655612c11ebb4117ea1f80983cb2b215c9cccded127282cebc
-    # via
-    #   cuda-tile
-    #   nvidia-cuda-nvcc
-    #   nvidia-cuda-tileiras
+    # via nvidia-cuda-nvcc
 nvtx==0.2.15 ; platform_machine == 'x86_64' and sys_platform == 'linux' \
     --hash=sha256:02bca69ee55e0be41eabf908de9dbcdd18e702c7f49f9aa63fd396ce684ff5d5 \
     --hash=sha256:10749686633f880ad53dcdbb2179fad41b45dcf5b7631d4a1070a577577bd386 \
