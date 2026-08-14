@@ -60,9 +60,9 @@ Works on macOS, Linux, or Windows — no GPU needed.
 3. Verify the install by running all three CLI stubs:
 
    ```bash
-   .venv/bin/mycelium-node
-   .venv/bin/mycelium-coordinator
-   .venv/bin/mycelium-client
+   .venv/bin/mycelium-node        # Windows: .venv\Scripts\mycelium-node
+   .venv/bin/mycelium-coordinator # Windows: .venv\Scripts\mycelium-coordinator
+   .venv/bin/mycelium-client      # Windows: .venv\Scripts\mycelium-client
    ```
 
    Expected output:
