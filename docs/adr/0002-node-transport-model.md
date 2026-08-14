@@ -33,8 +33,8 @@ would have silently tested from inside the university network instead.
 | Target | Port | Result | Interpretation |
 |---|---|---|---|
 | `192.168.22.23` (`a6000`, IIITD lab GPU machine) | 22 (SSH) | `nc -zv`: **timed out** | Private RFC1918 address — unroutable from the public internet by definition, and confirmed directly. |
-| `paramrudra.iuac.res.in` (IUAC/CDAC HPC login node) | 4422 (SSH) | `nc -zv` / real `ssh`: **succeeded immediately** | SSH is open to the general internet on this one specific port. |
-| `paramrudra.iuac.res.in` | 8022 (test listener — independently confirmed bound: `ss -tlnp` showed `LISTEN 0.0.0.0:8022`; a local `curl` returned `200`) | `nc -zv` / `curl`: **timed out**, not refused | A silent drop, not an OS-level rejection — consistent with a stateful firewall allow-listing only port 4422 and dropping everything else. |
+| `paramrudra.iuac.res.in` (`14.139.62.247`) (IUAC/CDAC HPC login node) | 4422 (SSH) | `nc -zv` / real `ssh`: **succeeded immediately** | SSH is open to the general internet on this one specific port. |
+| `paramrudra.iuac.res.in` (`14.139.62.247`) | 8022 (test listener — independently confirmed bound: `ss -tlnp` showed `LISTEN 0.0.0.0:8022`; a local `curl` returned `200`) | `nc -zv` / `curl`: **timed out**, not refused | A silent drop, not an OS-level rejection — consistent with a stateful firewall allow-listing only port 4422 and dropping everything else. |
 
 Full narrative of the investigation (including the permission and VPN-
 reconnect complications encountered) is in
