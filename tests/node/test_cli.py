@@ -1,9 +1,11 @@
 """Tests for mycelium.node.cli."""
 
+import asyncio
 import json
 import os
 import signal
 import socket
+import ssl
 import subprocess
 import sys
 import time
@@ -12,26 +14,13 @@ from pathlib import Path
 from threading import Thread
 
 import pytest
+import websockets
 
 from mycelium.coordinator import certs
 from mycelium.node import vllm_process
 from mycelium.node.cli import _run, parse_args
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-def _process_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    return True
 
 
 def test_parse_args_partial_coordinator_args_rejected():
@@ -51,14 +40,32 @@ def test_parse_args_prompt_alone_is_valid():
     assert args.prompt == "hello"
     assert args.coordinator_url is None
     assert args.coordinator_cert is None
+    assert args.token_file is None
 
 
-def test_parse_args_coordinator_alone_is_valid():
+def test_parse_args_coordinator_requires_token_file(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    cert_path.write_text("placeholder")
+    with pytest.raises(SystemExit):
+        parse_args(
+            ["--coordinator-url", "wss://example:8765", "--coordinator-cert", str(cert_path)]
+        )
+
+
+def test_parse_args_coordinator_alone_is_valid(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    cert_path.write_text("placeholder")
+    token_file = tmp_path / "token"
+    token_file.write_text("secret")
     args = parse_args(
-        ["--coordinator-url", "wss://example:8765", "--coordinator-cert", "/tmp/cert.pem"]
+        [
+            "--coordinator-url", "wss://example:8765",
+            "--coordinator-cert", str(cert_path),
+            "--token-file", str(token_file),
+        ]
     )
     assert args.coordinator_url == "wss://example:8765"
-    assert str(args.coordinator_cert) == "/tmp/cert.pem"
+    assert str(args.coordinator_cert) == str(cert_path)
     assert args.prompt is None
 
 
@@ -67,15 +74,23 @@ def test_parse_args_defaults():
     assert args.model == vllm_process.DEFAULT_MODEL
     assert args.gpu == vllm_process.DEFAULT_GPU
     assert args.vllm_port == vllm_process.DEFAULT_PORT
+    assert args.node_id is None
 
 
 def test_parse_args_overrides():
     args = parse_args(
-        ["--prompt", "hi", "--model", "some/other-model", "--gpu", "1", "--vllm-port", "9000"]
+        [
+            "--prompt", "hi",
+            "--model", "some/other-model",
+            "--gpu", "1",
+            "--vllm-port", "9000",
+            "--node-id", "my-node",
+        ]
     )
     assert args.model == "some/other-model"
     assert args.gpu == "1"
     assert args.vllm_port == 9000
+    assert args.node_id == "my-node"
 
 
 class _FakeVLLMHandler(BaseHTTPRequestHandler):
@@ -117,12 +132,24 @@ def fake_vllm_server():
     thread.join()
 
 
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
 async def test_run_prompt_mode_forwards_prompt_and_prints_completion(
     monkeypatch, capsys, fake_vllm_server
 ):
     port = fake_vllm_server.server_address[1]
-    # Point the CLI's vLLM launch at the already-running fake server instead
-    # of a real `vllm serve`, by making build_command exec a no-op stub.
     monkeypatch.setattr(
         vllm_process, "build_command", lambda model, port_: [sys.executable, "-c", "import time; time.sleep(600)"]
     )
@@ -132,6 +159,211 @@ async def test_run_prompt_mode_forwards_prompt_and_prints_completion(
     await _run(args, process)
 
     assert "fake completion" in capsys.readouterr().out
+
+
+def _server_ssl_context(cert_path, key_path):
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
+    return context
+
+
+async def test_run_registers_with_coordinator_using_token_and_node_id(
+    tmp_path, monkeypatch, fake_vllm_server
+):
+    vllm_port = fake_vllm_server.server_address[1]
+    monkeypatch.setattr(
+        vllm_process, "build_command", lambda model, port_: [sys.executable, "-c", "import time; time.sleep(600)"]
+    )
+
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+    token_file = tmp_path / "token"
+    token_file.write_text("secret-token\n")
+
+    received = {}
+    registered_event = asyncio.Event()
+
+    async def fake_coordinator(websocket):
+        received.update(json.loads(await websocket.recv()))
+        await websocket.send(json.dumps({"type": "registered"}))
+        registered_event.set()
+        await websocket.wait_closed()
+
+    server_ctx = _server_ssl_context(cert_path, key_path)
+    async with websockets.serve(fake_coordinator, "127.0.0.1", 0, ssl=server_ctx) as coordinator:
+        coord_port = coordinator.sockets[0].getsockname()[1]
+        args = parse_args(
+            [
+                "--coordinator-url", f"wss://127.0.0.1:{coord_port}",
+                "--coordinator-cert", str(cert_path),
+                "--token-file", str(token_file),
+                "--node-id", "test-node",
+                "--vllm-port", str(vllm_port),
+            ]
+        )
+        process = vllm_process.VLLMProcess(model=args.model, gpu=args.gpu, port=args.vllm_port)
+        run_task = asyncio.create_task(_run(args, process))
+        await asyncio.wait_for(registered_event.wait(), timeout=5.0)
+        run_task.cancel()
+        try:
+            await run_task
+        except asyncio.CancelledError:
+            pass
+
+    assert received == {
+        "type": "register",
+        "token": "secret-token",
+        "model": vllm_process.DEFAULT_MODEL,
+        "node_id": "test-node",
+    }
+
+
+async def test_run_retries_after_registration_rejected(tmp_path, monkeypatch, fake_vllm_server):
+    vllm_port = fake_vllm_server.server_address[1]
+    monkeypatch.setattr(
+        vllm_process, "build_command", lambda model, port_: [sys.executable, "-c", "import time; time.sleep(600)"]
+    )
+
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+    token_file = tmp_path / "token"
+    token_file.write_text("wrong-token\n")
+
+    attempt_count = 0
+
+    async def rejecting_coordinator(websocket):
+        nonlocal attempt_count
+        attempt_count += 1
+        await websocket.recv()
+        await websocket.send(json.dumps({"type": "registration_rejected", "reason": "invalid token"}))
+        await websocket.close()
+
+    server_ctx = _server_ssl_context(cert_path, key_path)
+    async with websockets.serve(rejecting_coordinator, "127.0.0.1", 0, ssl=server_ctx) as coordinator:
+        coord_port = coordinator.sockets[0].getsockname()[1]
+        args = parse_args(
+            [
+                "--coordinator-url", f"wss://127.0.0.1:{coord_port}",
+                "--coordinator-cert", str(cert_path),
+                "--token-file", str(token_file),
+                "--vllm-port", str(vllm_port),
+            ]
+        )
+        process = vllm_process.VLLMProcess(model=args.model, gpu=args.gpu, port=args.vllm_port)
+        run_task = asyncio.create_task(_run(args, process))
+        await asyncio.sleep(2.5)  # let it attempt, get rejected, back off (~1s), attempt again
+        run_task.cancel()
+        try:
+            await run_task
+        except asyncio.CancelledError:
+            pass
+
+    assert 2 <= attempt_count <= 4, (
+        f"expected a small, backoff-bounded number of attempts, got {attempt_count} "
+        "(a much higher count would indicate the no-backoff regression)"
+    )
+
+
+async def test_registration_backoff_resets_after_a_successful_registration(
+    tmp_path, monkeypatch, fake_vllm_server
+):
+    vllm_port = fake_vllm_server.server_address[1]
+    monkeypatch.setattr(
+        vllm_process, "build_command", lambda model, port_: [sys.executable, "-c", "import time; time.sleep(600)"]
+    )
+
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+    token_file = tmp_path / "token"
+    token_file.write_text("secret-token\n")
+
+    attempt_times = []
+
+    async def flaky_coordinator(websocket):
+        attempt_times.append(time.monotonic())
+        attempt_number = len(attempt_times)
+        await websocket.recv()
+        if attempt_number == 3:
+            # Third attempt succeeds and immediately drops — this should
+            # reset the registration backoff grown by attempts 1 and 2's
+            # rejections (~1s then ~2s consumed).
+            await websocket.send(json.dumps({"type": "registered"}))
+            await websocket.close()
+        else:
+            # Attempts 1, 2, 4, 5: reject immediately.
+            await websocket.send(json.dumps({"type": "registration_rejected", "reason": "bad"}))
+            await websocket.close()
+
+    server_ctx = _server_ssl_context(cert_path, key_path)
+    async with websockets.serve(flaky_coordinator, "127.0.0.1", 0, ssl=server_ctx) as coordinator:
+        coord_port = coordinator.sockets[0].getsockname()[1]
+        args = parse_args(
+            [
+                "--coordinator-url", f"wss://127.0.0.1:{coord_port}",
+                "--coordinator-cert", str(cert_path),
+                "--token-file", str(token_file),
+                "--vllm-port", str(vllm_port),
+            ]
+        )
+        process = vllm_process.VLLMProcess(model=args.model, gpu=args.gpu, port=args.vllm_port)
+        run_task = asyncio.create_task(_run(args, process))
+        # Attempts 1-2 reject (growing the registration backoff to ~1s then
+        # ~2s consumed), attempt 3 succeeds+drops (should reset the
+        # backoff), attempts 4-5 reject again. If the reset didn't happen,
+        # attempt 4's failure would consume the *next* step of the
+        # already-grown generator (~3.2-4.8s) instead of the reset ~1s,
+        # pushing attempt 5 past this window.
+        await asyncio.sleep(6.0)
+        run_task.cancel()
+        try:
+            await run_task
+        except asyncio.CancelledError:
+            pass
+
+    assert len(attempt_times) >= 5, (
+        f"expected at least 5 attempts within 6s if the backoff resets after "
+        f"success, got {len(attempt_times)} attempts "
+        "(a broken reset would carry the grown ~3.2-4.8s delay into attempt "
+        "4's wait, pushing attempt 5 past this window)"
+    )
+    gap = attempt_times[4] - attempt_times[3]
+    assert gap < 2.0, (
+        f"expected the gap between attempt 4 and attempt 5 to reflect the "
+        f"reset ~1s backoff, got {gap:.2f}s "
+        "(a broken reset would carry over the ~3.2-4.8s delay grown by "
+        "attempts 1-2 instead)"
+    )
+
+
+async def test_run_rejects_empty_token_file_before_starting_vllm(tmp_path, monkeypatch, fake_vllm_server):
+    vllm_port = fake_vllm_server.server_address[1]
+    monkeypatch.setattr(
+        vllm_process, "build_command", lambda model, port_: [sys.executable, "-c", "import time; time.sleep(600)"]
+    )
+    cert_path = tmp_path / "cert.pem"
+    cert_path.write_text("placeholder")
+    token_file = tmp_path / "token"
+    token_file.write_text("  \n")
+
+    args = parse_args(
+        [
+            "--coordinator-url", "wss://127.0.0.1:1",
+            "--coordinator-cert", str(cert_path),
+            "--token-file", str(token_file),
+            "--vllm-port", str(vllm_port),
+        ]
+    )
+    process = vllm_process.VLLMProcess(model=args.model, gpu=args.gpu, port=args.vllm_port)
+
+    with pytest.raises(SystemExit, match="empty"):
+        await _run(args, process)
+
+    # vLLM must never have been started — the empty-token check happens
+    # before process.start(), so there's nothing to clean up here and no
+    # subprocess was spawned.
 
 
 def test_sigterm_stops_vllm_process_group_with_no_orphans(tmp_path):
@@ -165,6 +397,8 @@ def test_sigterm_stops_vllm_process_group_with_no_orphans(tmp_path):
     cert_path = tmp_path / "cert.pem"
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+    token_file = tmp_path / "token"
+    token_file.write_text("unused-token\n")
 
     env = dict(os.environ)
     env["PATH"] = f"{bin_dir}:{env['PATH']}"
@@ -174,11 +408,9 @@ def test_sigterm_stops_vllm_process_group_with_no_orphans(tmp_path):
     node_proc = subprocess.Popen(
         [
             sys.executable, "-m", "mycelium.node.cli",
-            # Port 1 is privileged/unbound: connection refused immediately,
-            # so the node agent sits in its reconnect-backoff loop — a
-            # stable "running" state to send SIGTERM to.
             "--coordinator-url", "wss://127.0.0.1:1",
             "--coordinator-cert", str(cert_path),
+            "--token-file", str(token_file),
             "--vllm-port", str(vllm_port),
         ],
         env=env,
@@ -207,6 +439,6 @@ def test_sigterm_stops_vllm_process_group_with_no_orphans(tmp_path):
             node_proc.wait()
 
     assert parent_pid is not None and child_pid is not None
-    time.sleep(0.5)  # give the OS a moment to reap the killed processes
+    time.sleep(0.5)
     assert not _process_alive(parent_pid)
     assert not _process_alive(child_pid)
