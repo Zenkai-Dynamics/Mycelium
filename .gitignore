@@ -401,3 +401,20 @@ Cargo.lock
 
 # git worktrees for isolated development
 .worktrees/
+
+# AI/LLM Agent tool configurations and settings
+.claude/
+.codebuddy/
+.cursorrules
+.gemini/
+.kiro/
+.mcp.json
+.qoder/
+.vscode/
+.windsurfrules
+AGENTS.md
+CODEBUDDY.md
+GEMINI.md
+QODER.md
+opencode.jsonc
+.github
