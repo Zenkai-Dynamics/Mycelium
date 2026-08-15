@@ -489,6 +489,128 @@ async def test_complete_request_node_disconnect_mid_request_fails_fast(tmp_path,
             )
 
 
+async def test_complete_request_client_disconnect_before_reply_does_not_crash_server(
+    tmp_path, caplog
+):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        node_ws = await websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx)
+        await node_ws.send(json.dumps(
+            {"type": "register", "token": "secret-token", "model": "m", "node_id": "node-a"}
+        ))
+        await node_ws.recv()
+
+        async def reply_after_client_gone():
+            raw = await node_ws.recv()  # the routed "complete"
+            message = json.loads(raw)
+            await asyncio.sleep(0.2)  # give the client time to disconnect first
+            await node_ws.send(json.dumps(
+                {"type": "complete_result", "request_id": message["request_id"], "text": "too late"}
+            ))
+
+        node_task = asyncio.create_task(reply_after_client_gone())
+
+        client_ws = await websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx)
+        await client_ws.send(json.dumps(
+            {"type": "complete", "token": "secret-token", "model": "m", "prompt": "hi"}
+        ))
+        await client_ws.close()  # disconnect before the node replies
+
+        await node_task  # let the coordinator attempt (and fail) its send to the gone client
+
+        # Server must still be accepting new connections afterward — the
+        # send failing above must not have crashed the connection handler.
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as status_ws:
+            await status_ws.send(json.dumps({"type": "status_query", "token": "secret-token"}))
+            response = json.loads(await status_ws.recv())
+            assert response["nodes"] == [{"node_id": "node-a", "model": "m"}]
+
+        await node_ws.close()
+
+    # The connection handler must have swallowed the send failure quietly,
+    # not let it escape and get logged as a "connection handler failed"
+    # error by the websockets library (the un-fixed behavior).
+    assert not any(record.levelno >= 40 for record in caplog.records), (
+        "an error was logged — the ConnectionClosed from sending to the "
+        "already-gone client must be caught, not left to propagate"
+    )
+
+
+async def test_superseded_node_connection_fails_only_its_own_pending_requests(tmp_path, monkeypatch):
+    monkeypatch.setattr(router, "NODE_COMPLETE_TIMEOUT_SECONDS", 30.0)
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+
+        old_node_ws = await websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx)
+        await old_node_ws.send(json.dumps(
+            {"type": "register", "token": "secret-token", "model": "m", "node_id": "node-a"}
+        ))
+        await old_node_ws.recv()
+
+        old_client_ws = await websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx)
+
+        async def old_client_request():
+            await old_client_ws.send(json.dumps(
+                {"type": "complete", "token": "secret-token", "model": "m", "prompt": "old"}
+            ))
+            return json.loads(await old_client_ws.recv())
+
+        old_request_task = asyncio.create_task(old_client_request())
+
+        # Confirm the routed "complete" actually reached the OLD connection
+        # before proceeding, so we know route_request has registered a
+        # pending future on the OLD node's captured Node object.
+        routed = json.loads(await old_node_ws.recv())
+        assert routed["type"] == "complete"
+
+        # Register a second connection under the same node_id — supersedes
+        # the old one (issue #8 behavior); the coordinator closes
+        # old_node_ws in the background.
+        new_node_ws = await websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx)
+        await new_node_ws.send(json.dumps(
+            {"type": "register", "token": "secret-token", "model": "m", "node_id": "node-a"}
+        ))
+        await new_node_ws.recv()
+
+        # The OLD client's pending request must fail fast via the OLD
+        # connection's own disconnect cleanup — not sit out the full 30s
+        # NODE_COMPLETE_TIMEOUT_SECONDS.
+        start = time.monotonic()
+        old_response = await asyncio.wait_for(old_request_task, timeout=5.0)
+        elapsed = time.monotonic() - start
+        assert old_response["type"] == "complete_error"
+        assert elapsed < 3.0, (
+            f"old client waited {elapsed:.2f}s — a superseded connection's cleanup must "
+            "fail its own pending requests fast, not wait out the full 30s timeout"
+        )
+
+        # The NEW connection's own pending dict must be untouched by the
+        # old connection's cleanup: route a fresh request through it and
+        # confirm it gets a correct, normal reply.
+        node_task = asyncio.create_task(_run_fake_node(
+            new_node_ws, lambda msg: {"type": "complete_result", "text": f"echo: {msg['prompt']}"}
+        ))
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as new_client_ws:
+            await new_client_ws.send(json.dumps(
+                {"type": "complete", "token": "secret-token", "model": "m", "prompt": "new"}
+            ))
+            new_response = json.loads(await new_client_ws.recv())
+            assert new_response == {"type": "complete_result", "text": "echo: new"}
+
+        node_task.cancel()
+        await old_client_ws.close()
+
+
 async def test_concurrent_complete_requests_to_same_node_get_correct_replies(tmp_path):
     cert_path = tmp_path / "cert.pem"
     key_path = tmp_path / "key.pem"

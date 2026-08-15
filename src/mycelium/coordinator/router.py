@@ -88,7 +88,10 @@ async def route_request(
         node.pending.pop(request_id, None)
 
     if message.get("type") == "complete_result":
-        return message["text"]
+        text = message.get("text")
+        if text is None:
+            raise NodeError("node sent a malformed complete_result (missing text)")
+        return text
     # _dispatch_node_message (server.py) only ever resolves this future
     # with a "complete_result" or "complete_error" message — anything else
     # coming out of `await future` above is a set_exception, not this

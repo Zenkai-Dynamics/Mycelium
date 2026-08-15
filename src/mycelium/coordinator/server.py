@@ -106,9 +106,12 @@ async def _handle_complete_request(websocket, registry: NodeRegistry, message: d
     model = message.get("model")
     prompt = message.get("prompt")
     if not model or not prompt:
-        await websocket.send(json.dumps(
-            {"type": "complete_error", "reason": "model and prompt are required"}
-        ))
+        try:
+            await websocket.send(json.dumps(
+                {"type": "complete_error", "reason": "model and prompt are required"}
+            ))
+        except websockets.exceptions.ConnectionClosed:
+            return
         await websocket.close()
         return
 
@@ -118,11 +121,17 @@ async def _handle_complete_request(websocket, registry: NodeRegistry, message: d
             raise router.NoHealthyNodeError(f"no healthy node for model {model!r}")
         text = await router.route_request(node, prompt)
     except router.RoutingError as exc:
-        await websocket.send(json.dumps({"type": "complete_error", "reason": str(exc)}))
+        try:
+            await websocket.send(json.dumps({"type": "complete_error", "reason": str(exc)}))
+        except websockets.exceptions.ConnectionClosed:
+            return
         await websocket.close()
         return
 
-    await websocket.send(json.dumps({"type": "complete_result", "text": text}))
+    try:
+        await websocket.send(json.dumps({"type": "complete_result", "text": text}))
+    except websockets.exceptions.ConnectionClosed:
+        return
     await websocket.close()
 
 

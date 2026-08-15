@@ -120,6 +120,16 @@ async def test_route_request_propagates_disconnected_error_set_on_future():
     assert node.pending == {}
 
 
+async def test_route_request_raises_node_error_when_complete_result_missing_text():
+    node = _make_node()
+    asyncio.create_task(_resolve_after(node, 0.05, {"type": "complete_result"}))
+
+    with pytest.raises(router.NodeError, match="malformed complete_result"):
+        await router.route_request(node, "prompt", timeout=2.0)
+
+    assert node.pending == {}
+
+
 def test_all_router_errors_are_routing_errors():
     assert issubclass(router.NoHealthyNodeError, router.RoutingError)
     assert issubclass(router.NodeTimeoutError, router.RoutingError)

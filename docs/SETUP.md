@@ -57,23 +57,22 @@ Works on macOS, Linux, or Windows — no GPU needed.
    .venv/bin/pip install -e .        # Windows: .venv\Scripts\pip install -e .
    ```
 
-3. Verify the install. `mycelium-client` is still a stub that just prints
-   its version; `mycelium-node` and `mycelium-coordinator` are real CLIs
-   now (they open a coordinator↔node WebSocket transport — see
-   [ADR-0002](adr/0002-node-transport-model.md)), so instead of running
-   them bare, pass `--help` to confirm the install without requiring
-   connection arguments or blocking:
+3. Verify the install. All three commands open real functionality now (the
+   node/coordinator open a coordinator↔node WebSocket transport — see
+   [ADR-0002](adr/0002-node-transport-model.md); the client sends a real
+   request to a coordinator), so instead of running them bare, pass
+   `--help` to confirm the install without requiring connection arguments
+   or blocking:
 
    ```bash
-   .venv/bin/mycelium-client      # Windows: .venv\Scripts\mycelium-client
+   .venv/bin/mycelium-client --help      # Windows: .venv\Scripts\mycelium-client --help
    .venv/bin/mycelium-node --help        # Windows: .venv\Scripts\mycelium-node --help
    .venv/bin/mycelium-coordinator --help # Windows: .venv\Scripts\mycelium-coordinator --help
    ```
 
-   `mycelium-client` should print `mycelium-client 0.1.0`; the other two
-   should exit cleanly with a usage message. If you see that, your
-   environment is set up correctly. See each command's own `--help` for
-   its actual usage.
+   All three should exit cleanly with a usage message. If you see that,
+   your environment is set up correctly. See each command's own `--help`
+   for its actual usage.
 
 ## Node / GPU setup
 
