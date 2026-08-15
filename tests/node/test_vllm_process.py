@@ -2,6 +2,7 @@
 
 import json
 import os
+import socket
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -16,9 +17,17 @@ from mycelium.node.vllm_process import VLLMProcess, VLLMReadyTimeout
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 def test_build_command():
     command = vllm_process.build_command("Qwen/Qwen2.5-7B-Instruct", 8811)
-    assert command == ["vllm", "serve", "Qwen/Qwen2.5-7B-Instruct", "--port", "8811"]
+    assert command == [
+        "vllm", "serve", "Qwen/Qwen2.5-7B-Instruct", "--host", "127.0.0.1", "--port", "8811",
+    ]
 
 
 def test_build_env_sets_gpu_pin_and_flashinfer_flag(monkeypatch):
@@ -77,7 +86,7 @@ def test_wait_ready_returns_once_health_endpoint_is_up(fake_vllm_server):
 
 
 def test_wait_ready_raises_on_timeout():
-    process = VLLMProcess(port=39999)  # nothing listening on this port
+    process = VLLMProcess(port=_free_port())  # nothing listening on this port
     with pytest.raises(VLLMReadyTimeout):
         process.wait_ready(timeout=1.0)
 
@@ -100,7 +109,7 @@ def _process_alive(pid: int) -> bool:
 def test_start_stop_kills_process_group_with_no_orphans(tmp_path):
     pid_file = tmp_path / "pid"
     child_pid_file = tmp_path / "child_pid"
-    port = 39998
+    port = _free_port()
     command = [
         sys.executable,
         str(FIXTURES_DIR / "fake_vllm.py"),
@@ -109,6 +118,8 @@ def test_start_stop_kills_process_group_with_no_orphans(tmp_path):
         str(child_pid_file),
     ]
 
+    parent_pid = None
+    child_pid = None
     process = VLLMProcess(port=port)
     process.start(command=command)
     try:
@@ -120,6 +131,7 @@ def test_start_stop_kills_process_group_with_no_orphans(tmp_path):
     finally:
         process.stop()
 
+    assert parent_pid is not None and child_pid is not None, "vLLM never reported its PIDs"
     time.sleep(0.5)  # give the OS a moment to reap the killed processes
     assert not _process_alive(parent_pid)
     assert not _process_alive(child_pid)

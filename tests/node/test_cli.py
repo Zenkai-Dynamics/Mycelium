@@ -1,17 +1,37 @@
 """Tests for mycelium.node.cli."""
 
 import json
+import os
+import signal
+import socket
+import subprocess
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from threading import Thread
 
 import pytest
 
+from mycelium.coordinator import certs
 from mycelium.node import vllm_process
 from mycelium.node.cli import _run, parse_args
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
 
 
 def test_parse_args_partial_coordinator_args_rejected():
@@ -107,7 +127,86 @@ async def test_run_prompt_mode_forwards_prompt_and_prints_completion(
         vllm_process, "build_command", lambda model, port_: [sys.executable, "-c", "import time; time.sleep(600)"]
     )
     args = parse_args(["--prompt", "what is the answer?", "--vllm-port", str(port)])
+    process = vllm_process.VLLMProcess(model=args.model, gpu=args.gpu, port=args.vllm_port)
 
-    await _run(args)
+    await _run(args, process)
 
     assert "fake completion" in capsys.readouterr().out
+
+
+def test_sigterm_stops_vllm_process_group_with_no_orphans(tmp_path):
+    """Regression test for the SIGTERM/SIGHUP orphan bug found in final
+    review: drives the real CLI as an OS subprocess (not a direct function
+    call) so an actual signal is what triggers cleanup, via a `vllm` shim
+    on PATH that spawns a child process the way vLLM spawns its own worker
+    — proving a bare-PID kill would leave that child behind."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    pid_dir = tmp_path / "pids"
+    pid_dir.mkdir()
+
+    shim = bin_dir / "vllm"
+    shim.write_text(
+        "#!/usr/bin/env python3\n"
+        "import http.server, os, subprocess, sys\n"
+        "port = int(sys.argv[sys.argv.index('--port') + 1])\n"
+        "pid_dir = os.environ['FAKE_VLLM_PID_DIR']\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)'])\n"
+        "open(os.path.join(pid_dir, 'parent'), 'w').write(str(os.getpid()))\n"
+        "open(os.path.join(pid_dir, 'child'), 'w').write(str(child.pid))\n"
+        "class H(http.server.BaseHTTPRequestHandler):\n"
+        "    def do_GET(self):\n"
+        "        self.send_response(200); self.end_headers()\n"
+        "    def log_message(self, *a): pass\n"
+        "http.server.HTTPServer(('127.0.0.1', port), H).serve_forever()\n"
+    )
+    shim.chmod(0o755)
+
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    env = dict(os.environ)
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["FAKE_VLLM_PID_DIR"] = str(pid_dir)
+    vllm_port = _free_port()
+
+    node_proc = subprocess.Popen(
+        [
+            sys.executable, "-m", "mycelium.node.cli",
+            # Port 1 is privileged/unbound: connection refused immediately,
+            # so the node agent sits in its reconnect-backoff loop — a
+            # stable "running" state to send SIGTERM to.
+            "--coordinator-url", "wss://127.0.0.1:1",
+            "--coordinator-cert", str(cert_path),
+            "--vllm-port", str(vllm_port),
+        ],
+        env=env,
+    )
+    parent_pid = None
+    child_pid = None
+    try:
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            if (pid_dir / "parent").exists() and (pid_dir / "child").exists():
+                break
+            time.sleep(0.2)
+        else:
+            pytest.fail("fake vllm never reported its PIDs")
+
+        parent_pid = int((pid_dir / "parent").read_text())
+        child_pid = int((pid_dir / "child").read_text())
+        assert _process_alive(parent_pid)
+        assert _process_alive(child_pid)
+
+        node_proc.send_signal(signal.SIGTERM)
+        node_proc.wait(timeout=15.0)
+    finally:
+        if node_proc.poll() is None:
+            node_proc.kill()
+            node_proc.wait()
+
+    assert parent_pid is not None and child_pid is not None
+    time.sleep(0.5)  # give the OS a moment to reap the killed processes
+    assert not _process_alive(parent_pid)
+    assert not _process_alive(child_pid)

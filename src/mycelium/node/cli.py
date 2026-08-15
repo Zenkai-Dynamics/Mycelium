@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import signal
+import sys
 from pathlib import Path
 
 from mycelium import __version__
@@ -14,6 +16,7 @@ from mycelium.node.vllm_process import (
     DEFAULT_MODEL,
     DEFAULT_PORT,
     VLLMProcess,
+    VLLMReadyTimeout,
 )
 
 
@@ -41,8 +44,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
-async def _run(args: argparse.Namespace) -> None:
-    process = VLLMProcess(model=args.model, gpu=args.gpu, port=args.vllm_port)
+async def _run(args: argparse.Namespace, process: VLLMProcess) -> None:
     print(f"starting vLLM ({args.model} on GPU {args.gpu})...", flush=True)
     await asyncio.to_thread(process.start)
     try:
@@ -69,7 +71,26 @@ async def _run(args: argparse.Namespace) -> None:
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     args = parse_args()
-    asyncio.run(_run(args))
+    process = VLLMProcess(model=args.model, gpu=args.gpu, port=args.vllm_port)
+
+    # Raw signal.signal, not asyncio's loop.add_signal_handler: a real OS
+    # signal interrupts the event loop's blocking wait even while the main
+    # coroutine is stuck inside an `asyncio.to_thread(...)` call (e.g. mid
+    # `wait_ready`, which can block up to READY_TIMEOUT_SECONDS) — asyncio
+    # task cancellation cannot interrupt an already-running executor thread,
+    # so only a synchronous, process-level handler reliably stops vLLM here.
+    def _handle_signal(signum: int, _frame) -> None:
+        process.stop()
+        sys.exit(128 + signum)
+
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        signal.signal(sig, _handle_signal)
+
+    try:
+        asyncio.run(_run(args, process))
+    except VLLMReadyTimeout as exc:
+        print(f"error: {exc}", flush=True)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

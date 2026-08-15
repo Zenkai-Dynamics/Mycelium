@@ -28,8 +28,11 @@ STOP_TIMEOUT_SECONDS = 15.0
 
 
 def build_command(model: str, port: int) -> list[str]:
-    """Build the `vllm serve` argv — the same invocation validated in issue #6."""
-    return ["vllm", "serve", model, "--port", str(port)]
+    """Build the `vllm serve` argv — the same invocation validated in issue
+    #6, plus an explicit loopback bind: nothing in this codebase ever talks
+    to vLLM over anything but 127.0.0.1, and an independently-owned node
+    shouldn't default to exposing it on every interface."""
+    return ["vllm", "serve", model, "--host", "127.0.0.1", "--port", str(port)]
 
 
 def build_env(gpu: str) -> dict[str, str]:
@@ -44,7 +47,8 @@ def build_env(gpu: str) -> dict[str, str]:
 
 
 class VLLMReadyTimeout(Exception):
-    """Raised when vLLM doesn't become healthy within the timeout."""
+    """Raised when vLLM doesn't become healthy within the timeout, or exits
+    before becoming healthy."""
 
 
 class VLLMProcess:
@@ -60,6 +64,7 @@ class VLLMProcess:
         self.gpu = gpu
         self.port = port
         self._process: subprocess.Popen | None = None
+        self._pgid: int | None = None
 
     def start(self, command: list[str] | None = None) -> None:
         """Launch `vllm serve` in its own process group (so stop() can kill
@@ -69,26 +74,49 @@ class VLLMProcess:
             env=build_env(self.gpu),
             start_new_session=True,
         )
+        # Captured now, not re-derived later: once the process exits, its
+        # PID can be recycled by the OS, making a later os.getpgid(pid)
+        # call unsafe/meaningless.
+        self._pgid = os.getpgid(self._process.pid)
 
     def stop(self, timeout: float = STOP_TIMEOUT_SECONDS) -> None:
         """SIGTERM the whole process group, escalating to SIGKILL if it
-        doesn't exit in time. No-op if start() was never called or the
-        process already exited."""
-        if self._process is None or self._process.poll() is not None:
+        doesn't exit in time. No-op if start() was never called.
+
+        Always attempts the process-group kill, even if vLLM's own leader
+        process has already exited on its own — vLLM's worker subprocess(es)
+        are a separate PID under the same group, and a leader-only exit
+        must not leave them orphaned (the whole point of process-group
+        cleanup instead of a bare PID kill).
+        """
+        if self._process is None:
             return
-        pgid = os.getpgid(self._process.pid)
-        os.killpg(pgid, signal.SIGTERM)
+        try:
+            os.killpg(self._pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            return  # whole group already gone
         try:
             self._process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            os.killpg(pgid, signal.SIGKILL)
+            try:
+                os.killpg(self._pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             self._process.wait()
 
     def wait_ready(self, timeout: float = READY_TIMEOUT_SECONDS) -> None:
-        """Poll /health until vLLM responds 200, or raise VLLMReadyTimeout."""
+        """Poll /health until vLLM responds 200, or raise VLLMReadyTimeout —
+        either because the timeout elapsed, or because vLLM exited early
+        (crash, OOM, bad model id) and would otherwise poll a dead port for
+        the full timeout before reporting a misleading error."""
         deadline = time.monotonic() + timeout
         url = f"http://127.0.0.1:{self.port}/health"
         while time.monotonic() < deadline:
+            if self._process is not None and self._process.poll() is not None:
+                raise VLLMReadyTimeout(
+                    f"vLLM exited with code {self._process.returncode} "
+                    "before becoming healthy"
+                )
             try:
                 with urllib.request.urlopen(url, timeout=HEALTH_REQUEST_TIMEOUT_SECONDS) as resp:
                     if resp.status == 200:
