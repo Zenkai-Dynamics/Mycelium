@@ -255,3 +255,88 @@ a real gap Phase 1 may need to close once untrusted clients or nodes are
 in the picture, not silently forgotten. Any change to node registration,
 heartbeat/liveness detection, or the shared-token auth model (#8/#9,
 unchanged). Any new HTTP/ASGI surface on the coordinator.
+
+## Live verification
+
+Run for real against the `a6000` node (`training-framework@192.168.22.23`),
+matching #7/#8's pattern: both the coordinator and the node ran on `a6000`
+itself. GPU 2 was idle at verification time (GPUs 0/1/3 were carrying
+other users' workloads on this shared machine, same as #8's run).
+
+A real random token (`openssl rand -hex 32`) was written to a token file;
+`mycelium-coordinator` started against it, auto-generating a cert for
+`127.0.0.1`. `mycelium-node --node-id a6000-live-verify-issue10 --gpu 2`
+started a real `vllm serve Qwen/Qwen2.5-7B-Instruct` — the model wasn't
+previously cached on this box (only the base, non-instruct `Qwen2.5-7B`
+was), so this run downloaded it for real before serving — and registered:
+
+```
+$ mycelium-node --coordinator-url wss://127.0.0.1:8765 \
+    --coordinator-cert coord-cert.pem --token-file token.txt \
+    --node-id a6000-live-verify-issue10 --gpu 2
+[...vLLM startup, real model download...]
+vLLM ready
+mycelium-node 0.1.0 connecting to wss://127.0.0.1:8765
+connected to coordinator (wss://127.0.0.1:8765)
+registered with coordinator as 'a6000-live-verify-issue10'
+
+$ mycelium-coordinator-status --coordinator-url wss://127.0.0.1:8765 \
+    --coordinator-cert coord-cert.pem --token-file token.txt
+a6000-live-verify-issue10: Qwen/Qwen2.5-7B-Instruct
+```
+
+**Success criterion #2** (a client sends one prompt; it round-trips
+correctly through coordinator → node → vLLM → response), verified twice
+against the real running stack, with exactly one healthy node registered:
+
+```
+$ mycelium-client --coordinator-url wss://127.0.0.1:8765 \
+    --coordinator-cert coord-cert.pem --token-file token.txt \
+    --model Qwen/Qwen2.5-7B-Instruct \
+    --prompt 'What is the capital of France? Answer in one short sentence.'
+The capital of France is Paris.
+# real 0m0.481s
+
+$ mycelium-client --coordinator-url wss://127.0.0.1:8765 \
+    --coordinator-cert coord-cert.pem --token-file token.txt \
+    --model Qwen/Qwen2.5-7B-Instruct \
+    --prompt 'Say the word banana and nothing else.'
+banana
+```
+
+**Success criterion #3** (killing a node removes it from routing — no
+request gets sent to a dead node): `SIGTERM` to the real node process.
+`nvidia-smi` confirmed GPU 2 back to its 4 MiB idle baseline (no orphaned
+vLLM/worker processes — same clean-shutdown behavior #7/#8 already
+verified, now exercised again on top of #10's own request-routing code),
+and a follow-up status query confirmed the drop:
+
+```
+$ mycelium-coordinator-status --coordinator-url wss://127.0.0.1:8765 \
+    --coordinator-cert coord-cert.pem --token-file token.txt
+No nodes registered.
+```
+
+**Success criterion #4** (a request made when no node is healthy fails
+with a clear, immediate error rather than hanging), verified against that
+same now-nodeless coordinator:
+
+```
+$ mycelium-client --coordinator-url wss://127.0.0.1:8765 \
+    --coordinator-cert coord-cert.pem --token-file token.txt \
+    --model Qwen/Qwen2.5-7B-Instruct --prompt 'hello'
+error: no healthy node for model 'Qwen/Qwen2.5-7B-Instruct'
+$ echo $?
+1
+# real 0m0.111s
+```
+
+Immediate (0.111s) and clearly attributable to the missing node, not a
+timeout or a hang — closing `router.py`'s `NoHealthyNodeError` path for
+real, not just in simulated tests.
+
+All four of Phase 0's success criteria (`docs/phases/phase-0-foundation.md`)
+are now confirmed against real hardware, not just the simulated test suite.
+The coordinator, node agent, and verification checkout were all torn down
+and removed from the shared `a6000` box afterward, leaving no trace beyond
+the log output captured above.
