@@ -98,7 +98,11 @@ async def _handle_complete_request(websocket, registry: NodeRegistry, message: d
     """A client's one-shot completion request: authenticate, pick a
     healthy node hosting the requested model, forward, relay the result
     (or a clear error) back, then close — see the design doc for issue
-    #10."""
+    #10. If the picked node turns out to be disconnected, self-heal the
+    registry and retry a different healthy node before giving up — see
+    the design doc for issue #11. A timeout or a node-reported failure is
+    not retried: the node might still be working, and silently re-running
+    the same prompt on a second node risks double-executing it."""
     if not registry.check_token(message.get("token")):
         await websocket.close()
         return
@@ -115,18 +119,29 @@ async def _handle_complete_request(websocket, registry: NodeRegistry, message: d
         await websocket.close()
         return
 
-    try:
-        node = registry.find_node_for_model(model)
-        if node is None:
-            raise router.NoHealthyNodeError(f"no healthy node for model {model!r}")
-        text = await router.route_request(node, prompt)
-    except router.RoutingError as exc:
+    tried: set[str] = set()
+    while True:
         try:
-            await websocket.send(json.dumps({"type": "complete_error", "reason": str(exc)}))
-        except websockets.exceptions.ConnectionClosed:
+            node = registry.find_node_for_model(model, exclude=frozenset(tried))
+            if node is None:
+                raise router.NoHealthyNodeError(f"no healthy node for model {model!r}")
+            text = await router.route_request(node, prompt)
+        except router.NodeDisconnectedError:
+            # The picked node is actually dead — self-heal the registry
+            # right away (don't wait for #9's ping/pong timeout) and try a
+            # different healthy node instead of failing the request.
+            registry.unregister(node.node_id, node.websocket)
+            tried.add(node.node_id)
+            continue
+        except router.RoutingError as exc:
+            try:
+                await websocket.send(json.dumps({"type": "complete_error", "reason": str(exc)}))
+            except websockets.exceptions.ConnectionClosed:
+                return
+            await websocket.close()
             return
-        await websocket.close()
-        return
+        else:
+            break
 
     try:
         await websocket.send(json.dumps({"type": "complete_result", "text": text}))
