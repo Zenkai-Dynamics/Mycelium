@@ -101,7 +101,8 @@ class NodeRegistry:
                 start = (ids.index(last) + 1) % len(candidates)
 
         node = candidates[start]
-        self._last_returned[model] = node.node_id
+        if not exclude:
+            self._last_returned[model] = node.node_id
         return node
 
     def get(self, node_id: str) -> Node | None:

@@ -133,6 +133,26 @@ def test_find_node_for_model_round_robin_restarts_when_last_returned_node_is_gon
     assert second.node_id == "node-b"
 
 
+def test_find_node_for_model_exclude_does_not_mutate_rotation_state():
+    registry = NodeRegistry("secret")
+    registry.register("node-a", "model-a", websocket="ws-a")
+    registry.register("node-b", "model-a", websocket="ws-b")
+    registry.register("node-c", "model-a", websocket="ws-c")
+
+    # Fresh call: sets rotation state to node-a
+    first = registry.find_node_for_model("model-a")
+    assert first.node_id == "node-a"
+
+    # Retry call with exclude: returns node-b but does NOT update rotation state
+    retry = registry.find_node_for_model("model-a", exclude=frozenset({"node-a"}))
+    assert retry.node_id == "node-b"
+
+    # Second fresh call: continues from node-a (not from retry's node-b),
+    # so next should be node-b
+    second = registry.find_node_for_model("model-a")
+    assert second.node_id == "node-b"
+
+
 def test_get_returns_registered_node():
     registry = NodeRegistry("secret")
     registry.register("node-a", "model-a", websocket="ws-a")
