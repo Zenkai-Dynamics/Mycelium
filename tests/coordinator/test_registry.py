@@ -89,12 +89,48 @@ def test_find_node_for_model_returns_none_when_registry_empty():
     assert registry.find_node_for_model("model-a") is None
 
 
-def test_find_node_for_model_returns_first_match_when_multiple_host_same_model():
+def test_find_node_for_model_round_robins_across_matching_nodes():
     registry = NodeRegistry("secret")
     registry.register("node-a", "model-a", websocket="ws-a")
     registry.register("node-b", "model-a", websocket="ws-b")
-    node = registry.find_node_for_model("model-a")
-    assert node.node_id == "node-a"
+
+    first = registry.find_node_for_model("model-a")
+    second = registry.find_node_for_model("model-a")
+    third = registry.find_node_for_model("model-a")
+
+    assert [first.node_id, second.node_id, third.node_id] == ["node-a", "node-b", "node-a"]
+
+
+def test_find_node_for_model_exclude_skips_given_node_ids():
+    registry = NodeRegistry("secret")
+    registry.register("node-a", "model-a", websocket="ws-a")
+    registry.register("node-b", "model-a", websocket="ws-b")
+
+    node = registry.find_node_for_model("model-a", exclude=frozenset({"node-a"}))
+
+    assert node.node_id == "node-b"
+
+
+def test_find_node_for_model_exclude_all_candidates_returns_none():
+    registry = NodeRegistry("secret")
+    registry.register("node-a", "model-a", websocket="ws-a")
+
+    assert registry.find_node_for_model("model-a", exclude=frozenset({"node-a"})) is None
+
+
+def test_find_node_for_model_round_robin_restarts_when_last_returned_node_is_gone():
+    registry = NodeRegistry("secret")
+    registry.register("node-a", "model-a", websocket="ws-a")
+    registry.register("node-b", "model-a", websocket="ws-b")
+    registry.register("node-c", "model-a", websocket="ws-c")
+
+    first = registry.find_node_for_model("model-a")
+    assert first.node_id == "node-a"
+
+    registry.unregister("node-a", websocket="ws-a")
+
+    second = registry.find_node_for_model("model-a")
+    assert second.node_id == "node-b"
 
 
 def test_get_returns_registered_node():

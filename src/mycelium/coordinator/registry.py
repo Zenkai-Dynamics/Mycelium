@@ -36,6 +36,9 @@ class NodeRegistry:
             raise ValueError("token must not be empty")
         self._token = token
         self._nodes: dict[str, Node] = {}
+        # model -> node_id this returned last, for round-robin selection in
+        # find_node_for_model. See the design doc for issue #11.
+        self._last_returned: dict[str, str] = {}
 
     def check_token(self, token: Any) -> bool:
         """Constant-time comparison against the configured token. Returns
@@ -64,14 +67,42 @@ class NodeRegistry:
         if current is not None and current.websocket is websocket:
             del self._nodes[node_id]
 
-    def find_node_for_model(self, model: str) -> Node | None:
-        """Return the first registered node hosting `model`, or None. No
-        load balancing across same-model nodes — see the design doc for
-        issue #10: Phase 0 doesn't need fairness, just a healthy match."""
-        for node in self._nodes.values():
-            if node.model == model:
-                return node
-        return None
+    def find_node_for_model(
+        self, model: str, exclude: frozenset[str] = frozenset()
+    ) -> Node | None:
+        """Return the next registered node hosting `model`, round-robin
+        across current candidates (skipping any node_id in `exclude`), or
+        None if none match — see the design doc for issue #11.
+
+        Rotation state is the node_id this returned last time for `model`;
+        the next call returns the candidate after it, wrapping around. If
+        that node has since left the registry (or is itself excluded),
+        rotation restarts from the front of the current candidate list —
+        no fairness guarantee across registry churn, only "don't always
+        pick the same node when several are healthy."
+
+        `exclude` lets a caller retry with a different node within one
+        client request (see server.py's failover loop) without disturbing
+        the cross-request rotation state.
+        """
+        candidates = [
+            node
+            for node in self._nodes.values()
+            if node.model == model and node.node_id not in exclude
+        ]
+        if not candidates:
+            return None
+
+        start = 0
+        last = self._last_returned.get(model)
+        if last is not None:
+            ids = [node.node_id for node in candidates]
+            if last in ids:
+                start = (ids.index(last) + 1) % len(candidates)
+
+        node = candidates[start]
+        self._last_returned[model] = node.node_id
+        return node
 
     def get(self, node_id: str) -> Node | None:
         """Return the currently-registered Node for node_id, or None.
