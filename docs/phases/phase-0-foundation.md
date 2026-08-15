@@ -28,7 +28,7 @@ One LLM. A small, closed pool of nodes the operator personally controls
 
 **Coordination model:** centralized, not peer-to-peer. With a handful of trusted nodes, a single coordinator is simplest to build and debug; decentralized discovery is deferred to Phase 1, where "opt-in from strangers" makes a single trust anchor less appropriate.
 
-**Failure handling:** if no healthy node is hosting the requested model, the coordinator fails the request immediately with a clear error. No queueing or retry logic in Phase 0.
+**Failure handling:** if no healthy node is hosting the requested model, the coordinator fails the request immediately with a clear error. No queueing in Phase 0; the only retry is a bounded, disconnect-only failover to a different healthy node when the one first picked turns out to be dead (#11) — a slow-but-alive node or an explicit node-reported failure is never retried.
 
 ## In scope
 
@@ -40,9 +40,9 @@ One LLM. A small, closed pool of nodes the operator personally controls
 ## Explicitly out of scope
 
 - Public/untrusted node onboarding, sandboxing, or output verification
-- Multiple simultaneous models or multi-node load balancing
+- Multiple simultaneous models, or load-balancing guarantees across nodes beyond #11's round-robin (fairness across registry churn, weighted routing, etc.)
 - Any cross-host context or activation passing
-- Queueing, retries, or failover
+- Queueing; retrying a timed-out or node-reported-failed request on a different node (#11 added disconnect-only failover across healthy nodes, but not this)
 
 ## Success criteria
 

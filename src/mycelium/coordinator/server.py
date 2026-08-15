@@ -125,6 +125,13 @@ async def _handle_complete_request(websocket, registry: NodeRegistry, message: d
             node = registry.find_node_for_model(model, exclude=frozenset(tried))
             if node is None:
                 raise router.NoHealthyNodeError(f"no healthy node for model {model!r}")
+            # Passed explicitly (not relying on route_request's own default)
+            # so tests can monkeypatch router.NODE_COMPLETE_TIMEOUT_SECONDS
+            # and have it actually take effect: Python binds a default
+            # argument value once at function-definition time, so the
+            # default alone would never see a post-import monkeypatch.
+            # Production behavior is unchanged — the constant is never
+            # mutated after import there.
             text = await router.route_request(
                 node, prompt, timeout=router.NODE_COMPLETE_TIMEOUT_SECONDS
             )
