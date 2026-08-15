@@ -398,3 +398,6 @@ Cargo.lock
 
 # generated TLS certs/keys — never commit
 *.pem
+
+# git worktrees for isolated development
+.worktrees/
