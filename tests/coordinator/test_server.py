@@ -8,7 +8,7 @@ import time
 import pytest
 import websockets
 
-from mycelium.coordinator import certs, server
+from mycelium.coordinator import certs, router, server
 
 
 def _client_ssl_context(cert_path):
@@ -336,3 +336,200 @@ async def test_silently_unresponsive_node_is_dropped_within_ping_timeout_window(
             await status_ws.send(json.dumps({"type": "status_query", "token": "secret-token"}))
             response = json.loads(await status_ws.recv())
             assert response["nodes"] == []
+
+
+async def _run_fake_node(node_ws, reply_for) -> None:
+    """Stand-in for a real node agent: replies to every "complete" message
+    it receives using reply_for(message) -> dict (the reply body, minus
+    request_id — this helper fills that in)."""
+    async for raw in node_ws:
+        message = json.loads(raw)
+        reply = reply_for(message)
+        reply["request_id"] = message["request_id"]
+        await node_ws.send(json.dumps(reply))
+
+
+async def test_complete_request_routes_to_registered_node_and_returns_result(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as node_ws:
+            await node_ws.send(json.dumps(
+                {"type": "register", "token": "secret-token", "model": "m", "node_id": "node-a"}
+            ))
+            await node_ws.recv()  # consume "registered"
+            node_task = asyncio.create_task(_run_fake_node(
+                node_ws, lambda msg: {"type": "complete_result", "text": f"echo: {msg['prompt']}"}
+            ))
+
+            async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws:
+                await client_ws.send(json.dumps(
+                    {"type": "complete", "token": "secret-token", "model": "m", "prompt": "hello"}
+                ))
+                response = json.loads(await client_ws.recv())
+                assert response == {"type": "complete_result", "text": "echo: hello"}
+
+            node_task.cancel()
+
+
+async def test_complete_request_with_no_matching_node_returns_error(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws:
+            await client_ws.send(json.dumps(
+                {"type": "complete", "token": "secret-token", "model": "no-such-model", "prompt": "hi"}
+            ))
+            response = json.loads(await client_ws.recv())
+            assert response["type"] == "complete_error"
+            assert "no-such-model" in response["reason"]
+
+
+async def test_complete_request_with_wrong_token_is_closed_without_reply(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws:
+            await client_ws.send(json.dumps(
+                {"type": "complete", "token": "wrong", "model": "m", "prompt": "hi"}
+            ))
+            with pytest.raises(websockets.exceptions.ConnectionClosed):
+                await client_ws.recv()
+
+
+async def test_complete_request_with_missing_prompt_returns_error(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws:
+            await client_ws.send(json.dumps(
+                {"type": "complete", "token": "secret-token", "model": "m"}
+            ))
+            response = json.loads(await client_ws.recv())
+            assert response["type"] == "complete_error"
+
+
+async def test_complete_request_node_reports_failure_is_relayed_to_client(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as node_ws:
+            await node_ws.send(json.dumps(
+                {"type": "register", "token": "secret-token", "model": "m", "node_id": "node-a"}
+            ))
+            await node_ws.recv()
+            node_task = asyncio.create_task(_run_fake_node(
+                node_ws, lambda msg: {"type": "complete_error", "reason": "vLLM exploded"}
+            ))
+
+            async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws:
+                await client_ws.send(json.dumps(
+                    {"type": "complete", "token": "secret-token", "model": "m", "prompt": "hi"}
+                ))
+                response = json.loads(await client_ws.recv())
+                assert response == {"type": "complete_error", "reason": "vLLM exploded"}
+
+            node_task.cancel()
+
+
+async def test_complete_request_node_disconnect_mid_request_fails_fast(tmp_path, monkeypatch):
+    monkeypatch.setattr(router, "NODE_COMPLETE_TIMEOUT_SECONDS", 30.0)
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        node_ws = await websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx)
+        await node_ws.send(json.dumps(
+            {"type": "register", "token": "secret-token", "model": "m", "node_id": "node-a"}
+        ))
+        await node_ws.recv()
+
+        async def receive_then_never_reply():
+            await node_ws.recv()  # accept the routed "complete", then go silent
+
+        node_task = asyncio.create_task(receive_then_never_reply())
+
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws:
+            await client_ws.send(json.dumps(
+                {"type": "complete", "token": "secret-token", "model": "m", "prompt": "hi"}
+            ))
+            await node_task  # make sure the node has received the routed request
+            await node_ws.close()  # simulate the node dying mid-request
+
+            start = time.monotonic()
+            response = json.loads(await asyncio.wait_for(client_ws.recv(), timeout=5.0))
+            elapsed = time.monotonic() - start
+            assert response["type"] == "complete_error"
+            assert elapsed < 3.0, (
+                f"client waited {elapsed:.2f}s — a node disconnect mid-request must fail "
+                "fast, not wait out the full 30s NODE_COMPLETE_TIMEOUT_SECONDS"
+            )
+
+
+async def test_concurrent_complete_requests_to_same_node_get_correct_replies(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as node_ws:
+            await node_ws.send(json.dumps(
+                {"type": "register", "token": "secret-token", "model": "m", "node_id": "node-a"}
+            ))
+            await node_ws.recv()
+
+            async def flaky_reversing_node():
+                # Reply out of arrival order, to prove correlation (not
+                # send order) determines which client gets which answer.
+                first = json.loads(await node_ws.recv())
+                second = json.loads(await node_ws.recv())
+                await node_ws.send(json.dumps({
+                    "type": "complete_result", "request_id": second["request_id"],
+                    "text": f"reply to: {second['prompt']}",
+                }))
+                await node_ws.send(json.dumps({
+                    "type": "complete_result", "request_id": first["request_id"],
+                    "text": f"reply to: {first['prompt']}",
+                }))
+
+            node_task = asyncio.create_task(flaky_reversing_node())
+
+            async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_a:
+                async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_b:
+                    await client_a.send(json.dumps(
+                        {"type": "complete", "token": "secret-token", "model": "m", "prompt": "A"}
+                    ))
+                    await client_b.send(json.dumps(
+                        {"type": "complete", "token": "secret-token", "model": "m", "prompt": "B"}
+                    ))
+                    response_a = json.loads(await client_a.recv())
+                    response_b = json.loads(await client_b.recv())
+
+            await node_task
+            assert response_a == {"type": "complete_result", "text": "reply to: A"}
+            assert response_b == {"type": "complete_result", "text": "reply to: B"}
