@@ -280,19 +280,20 @@ async def test_registration_backoff_resets_after_a_successful_registration(
     token_file = tmp_path / "token"
     token_file.write_text("secret-token\n")
 
-    attempt_count = 0
+    attempt_times = []
 
     async def flaky_coordinator(websocket):
-        nonlocal attempt_count
-        attempt_count += 1
+        attempt_times.append(time.monotonic())
+        attempt_number = len(attempt_times)
         await websocket.recv()
-        if attempt_count == 1:
-            # First attempt: succeed, then immediately drop the connection —
-            # this should reset the registration backoff.
+        if attempt_number == 3:
+            # Third attempt succeeds and immediately drops — this should
+            # reset the registration backoff grown by attempts 1 and 2's
+            # rejections (~1s then ~2s consumed).
             await websocket.send(json.dumps({"type": "registered"}))
             await websocket.close()
         else:
-            # Every attempt after the reset: reject immediately.
+            # Attempts 1, 2, 4, 5: reject immediately.
             await websocket.send(json.dumps({"type": "registration_rejected", "reason": "bad"}))
             await websocket.close()
 
@@ -309,18 +310,32 @@ async def test_registration_backoff_resets_after_a_successful_registration(
         )
         process = vllm_process.VLLMProcess(model=args.model, gpu=args.gpu, port=args.vllm_port)
         run_task = asyncio.create_task(_run(args, process))
-        await asyncio.sleep(2.5)  # attempt 1 succeeds+drops (no backoff spent), then 2-3 rejected attempts with backoff
+        # Attempts 1-2 reject (growing the registration backoff to ~1s then
+        # ~2s consumed), attempt 3 succeeds+drops (should reset the
+        # backoff), attempts 4-5 reject again. If the reset didn't happen,
+        # attempt 4's failure would consume the *next* step of the
+        # already-grown generator (~3.2-4.8s) instead of the reset ~1s,
+        # pushing attempt 5 past this window.
+        await asyncio.sleep(6.0)
         run_task.cancel()
         try:
             await run_task
         except asyncio.CancelledError:
             pass
 
-    # If the backoff generator weren't reset after attempt 1's success, this
-    # would still pass (it's bounded either way) — the real point is that
-    # attempt 1 costs no backoff delay, so the window fits one extra attempt
-    # versus test_run_retries_after_registration_rejected's all-rejected run.
-    assert attempt_count >= 2
+    assert len(attempt_times) >= 5, (
+        f"expected at least 5 attempts within 6s if the backoff resets after "
+        f"success, got {len(attempt_times)} attempts "
+        "(a broken reset would carry the grown ~3.2-4.8s delay into attempt "
+        "4's wait, pushing attempt 5 past this window)"
+    )
+    gap = attempt_times[4] - attempt_times[3]
+    assert gap < 2.0, (
+        f"expected the gap between attempt 4 and attempt 5 to reflect the "
+        f"reset ~1s backoff, got {gap:.2f}s "
+        "(a broken reset would carry over the ~3.2-4.8s delay grown by "
+        "attempts 1-2 instead)"
+    )
 
 
 async def test_run_rejects_empty_token_file_before_starting_vllm(tmp_path, monkeypatch, fake_vllm_server):
