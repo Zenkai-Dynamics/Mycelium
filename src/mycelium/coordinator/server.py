@@ -125,7 +125,9 @@ async def _handle_complete_request(websocket, registry: NodeRegistry, message: d
             node = registry.find_node_for_model(model, exclude=frozenset(tried))
             if node is None:
                 raise router.NoHealthyNodeError(f"no healthy node for model {model!r}")
-            text = await router.route_request(node, prompt)
+            text = await router.route_request(
+                node, prompt, timeout=router.NODE_COMPLETE_TIMEOUT_SECONDS
+            )
         except router.NodeDisconnectedError:
             # The picked node is actually dead — self-heal the registry
             # right away (don't wait for #9's ping/pong timeout) and try a
