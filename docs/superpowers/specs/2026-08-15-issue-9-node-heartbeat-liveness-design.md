@@ -120,7 +120,7 @@ now done, since #9 is exactly the change that makes those lines stale.
 ## Addendum: `close_timeout` also matters (found during implementation)
 
 The first implementation attempt's regression test failed — not because
-of a bug, but because the ~40s figure above was incomplete.
+of a bug, but because the original ~40s estimate (`ping_interval + ping_timeout` only) was incomplete.
 `websockets.asyncio.server.serve()` has a third relevant parameter,
 `close_timeout` (library default `10`), that `server.serve()` never
 passed. Tracing the library source (`websockets/asyncio/connection.py`):
@@ -149,16 +149,16 @@ guarantee resting on a number that isn't visible anywhere in Mycelium's
 own source.
 
 **Revised bound: `PING_INTERVAL_SECONDS + PING_TIMEOUT_SECONDS +
-CLOSE_TIMEOUT_SECONDS` ≈ 50s** (20 + 20 + 10), superseding the ~40s
-figure above.
+CLOSE_TIMEOUT_SECONDS` ≈ 50s** (20 + 20 + 10), superseding the original ~40s
+estimate.
 
 ## What actually changes
 
 - `src/mycelium/coordinator/server.py` — new `CLOSE_TIMEOUT_SECONDS`
   constant, passed to `websockets.serve()`; a comment above the three
   constants; docstring update.
-- `src/mycelium/node/connection.py` — docstring update only (no ping/pong
-  behavior change; documents that these constants now serve #9 too).
+- `src/mycelium/node/connection.py` — comment block above the two constants
+  (no ping/pong behavior change; documents that these constants now serve #9 too).
 - `src/mycelium/node/registration.py` — docstring update only.
 - `tests/coordinator/test_server.py` — one new test.
 - `docs/phases/phase-0-foundation.md` — note the resolved mechanism and

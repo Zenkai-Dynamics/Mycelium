@@ -51,7 +51,7 @@ def _close_in_background(websocket) -> None:
 async def _handle_node(websocket, registry: NodeRegistry) -> None:
     """Read the first message (a registration or a status query) and
     dispatch on it. A registered node's connection is then held open with
-    no further business logic yet (that's #9/#10's job); a status query
+    no further business logic yet (that's #10's job); a status query
     gets one response and the connection closes. Anything else — no
     message within the timeout, malformed JSON, an unrecognized type —
     closes the connection."""

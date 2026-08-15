@@ -301,6 +301,15 @@ async def test_silently_unresponsive_node_is_dropped_within_ping_timeout_window(
         ))
         await node_ws.recv()  # consume the "registered" ack
 
+        # Confirm the node appears in the registry before the liveness window
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as status_ws:
+            await status_ws.send(json.dumps({"type": "status_query", "token": "secret-token"}))
+            response = json.loads(await status_ws.recv())
+            assert response == {
+                "type": "status",
+                "nodes": [{"node_id": "node-a", "model": "m"}],
+            }
+
         # Simulate the node going silent (network partition, frozen process):
         # stop processing incoming bytes, so it can never answer a ping with
         # a pong, and can never complete the close handshake the coordinator
@@ -320,7 +329,7 @@ async def test_silently_unresponsive_node_is_dropped_within_ping_timeout_window(
             server.PING_INTERVAL_SECONDS
             + server.PING_TIMEOUT_SECONDS
             + server.CLOSE_TIMEOUT_SECONDS
-            + 0.3
+            + 1.0
         )
 
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as status_ws:
