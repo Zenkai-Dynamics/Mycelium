@@ -96,3 +96,39 @@ async def test_register_raises_on_unexpected_response_type(tmp_path):
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws:
             with pytest.raises(registration.RegistrationRejected):
                 await registration.register(ws, token="secret", model="m", node_id="node-a")
+
+
+async def test_register_raises_on_malformed_json_response(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async def malformed_coordinator(websocket):
+        await websocket.recv()
+        await websocket.send("not json at all")
+
+    server_ctx = _server_ssl_context(cert_path, key_path)
+    async with websockets.serve(malformed_coordinator, "127.0.0.1", 0, ssl=server_ctx) as fake_server:
+        port = fake_server.sockets[0].getsockname()[1]
+        client_ctx = connection.build_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws:
+            with pytest.raises(registration.RegistrationRejected, match="malformed response"):
+                await registration.register(ws, token="secret", model="m", node_id="node-a")
+
+
+async def test_register_raises_on_non_dict_json_response(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async def array_coordinator(websocket):
+        await websocket.recv()
+        await websocket.send(json.dumps([1, 2, 3]))
+
+    server_ctx = _server_ssl_context(cert_path, key_path)
+    async with websockets.serve(array_coordinator, "127.0.0.1", 0, ssl=server_ctx) as fake_server:
+        port = fake_server.sockets[0].getsockname()[1]
+        client_ctx = connection.build_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws:
+            with pytest.raises(registration.RegistrationRejected, match="non-dict response"):
+                await registration.register(ws, token="secret", model="m", node_id="node-a")

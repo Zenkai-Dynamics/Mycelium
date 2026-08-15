@@ -45,10 +45,19 @@ async def register(
     )
     try:
         raw = await asyncio.wait_for(websocket.recv(), timeout=timeout)
-    except TimeoutError:
-        raise RegistrationTimeout(f"coordinator did not respond within {timeout}s")
+    except TimeoutError as exc:
+        raise RegistrationTimeout(f"coordinator did not respond within {timeout}s") from None
 
-    message = json.loads(raw)
+    try:
+        message = json.loads(raw)
+    except json.JSONDecodeError:
+        raise RegistrationRejected("coordinator sent a malformed response")
+
+    if not isinstance(message, dict):
+        raise RegistrationRejected(
+            f"coordinator sent a non-dict response: {message!r}"
+        )
+
     if message.get("type") == "registered":
         return
     if message.get("type") == "registration_rejected":
