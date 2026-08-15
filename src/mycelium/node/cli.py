@@ -70,14 +70,18 @@ async def _run(args: argparse.Namespace, process: VLLMProcess) -> None:
             return
 
         print(f"mycelium-node {__version__} connecting to {args.coordinator_url}", flush=True)
+        registration_backoff = connection.reconnect_delays()
         async for websocket in connection.connect(args.coordinator_url, args.coordinator_cert):
             print(f"connected to coordinator ({args.coordinator_url})", flush=True)
             try:
                 await registration.register(websocket, token=token, model=args.model, node_id=node_id)
                 print(f"registered with coordinator as {node_id!r}", flush=True)
+                registration_backoff = connection.reconnect_delays()  # reset after success
             except registration.RegistrationError as exc:
-                print(f"registration failed: {exc}", flush=True)
+                delay = next(registration_backoff)
+                print(f"registration failed: {exc}; retrying in {delay:.1f}s", flush=True)
                 await websocket.close()
+                await asyncio.sleep(delay)
                 continue
             try:
                 await websocket.wait_closed()

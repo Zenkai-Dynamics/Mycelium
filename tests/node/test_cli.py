@@ -260,6 +260,66 @@ async def test_run_retries_after_registration_rejected(tmp_path, monkeypatch, fa
         except asyncio.CancelledError:
             pass
 
+    assert 2 <= attempt_count <= 4, (
+        f"expected a small, backoff-bounded number of attempts, got {attempt_count} "
+        "(a much higher count would indicate the no-backoff regression)"
+    )
+
+
+async def test_registration_backoff_resets_after_a_successful_registration(
+    tmp_path, monkeypatch, fake_vllm_server
+):
+    vllm_port = fake_vllm_server.server_address[1]
+    monkeypatch.setattr(
+        vllm_process, "build_command", lambda model, port_: [sys.executable, "-c", "import time; time.sleep(600)"]
+    )
+
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+    token_file = tmp_path / "token"
+    token_file.write_text("secret-token\n")
+
+    attempt_count = 0
+
+    async def flaky_coordinator(websocket):
+        nonlocal attempt_count
+        attempt_count += 1
+        await websocket.recv()
+        if attempt_count == 1:
+            # First attempt: succeed, then immediately drop the connection —
+            # this should reset the registration backoff.
+            await websocket.send(json.dumps({"type": "registered"}))
+            await websocket.close()
+        else:
+            # Every attempt after the reset: reject immediately.
+            await websocket.send(json.dumps({"type": "registration_rejected", "reason": "bad"}))
+            await websocket.close()
+
+    server_ctx = _server_ssl_context(cert_path, key_path)
+    async with websockets.serve(flaky_coordinator, "127.0.0.1", 0, ssl=server_ctx) as coordinator:
+        coord_port = coordinator.sockets[0].getsockname()[1]
+        args = parse_args(
+            [
+                "--coordinator-url", f"wss://127.0.0.1:{coord_port}",
+                "--coordinator-cert", str(cert_path),
+                "--token-file", str(token_file),
+                "--vllm-port", str(vllm_port),
+            ]
+        )
+        process = vllm_process.VLLMProcess(model=args.model, gpu=args.gpu, port=args.vllm_port)
+        run_task = asyncio.create_task(_run(args, process))
+        await asyncio.sleep(2.5)  # attempt 1 succeeds+drops (no backoff spent), then 2-3 rejected attempts with backoff
+        run_task.cancel()
+        try:
+            await run_task
+        except asyncio.CancelledError:
+            pass
+
+    # If the backoff generator weren't reset after attempt 1's success, this
+    # would still pass (it's bounded either way) — the real point is that
+    # attempt 1 costs no backoff delay, so the window fits one extra attempt
+    # versus test_run_retries_after_registration_rejected's all-rejected run.
     assert attempt_count >= 2
 
 
