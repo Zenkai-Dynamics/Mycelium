@@ -4,8 +4,10 @@ the result.
 See the design doc for issue #8. This module owns exactly one exchange:
 send {"type": "register", ...}, wait for {"type": "registered"} or
 {"type": "registration_rejected", ...}, bounded by a timeout. Everything
-after that — holding the connection open, future heartbeat/routing
-messages — is connection.py's/cli.py's job, not this module's.
+after that — holding the connection open, future routing messages — is
+connection.py's/cli.py's job, not this module's. Liveness tracking (#9)
+needs no message from this module at all: it rides on the same
+WebSocket's ping/pong keepalive, handled below connection.py, not here.
 """
 
 from __future__ import annotations

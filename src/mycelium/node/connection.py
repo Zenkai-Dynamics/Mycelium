@@ -15,6 +15,11 @@ from pathlib import Path
 
 import websockets
 
+# coordinator/server.py uses these same two values (plus its own
+# CLOSE_TIMEOUT_SECONDS) for issue #9's node-liveness detection —
+# test_server_and_connection_agree_on_keepalive_settings
+# (tests/test_integration.py) keeps PING_INTERVAL_SECONDS/PING_TIMEOUT_
+# SECONDS from drifting apart between the two sides.
 PING_INTERVAL_SECONDS = 20
 PING_TIMEOUT_SECONDS = 20
 
