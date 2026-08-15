@@ -2,7 +2,7 @@
 
 Status: **Building now**
 Depends on: nothing (first phase)
-Related: [ADR-0001 — project name](../adr/0001-project-name.md) · [ADR-0002 — node transport model](../adr/0002-node-transport-model.md) · [Phase 0 design rationale](../superpowers/specs/2026-08-12-mycelium-phase0-design.md) · [Dependency & hardware compatibility](../dependencies.md) · [Model choice & vLLM validation](../superpowers/specs/2026-08-14-issue-6-validate-model-vllm-design.md)
+Related: [ADR-0001 — project name](../adr/0001-project-name.md) · [ADR-0002 — node transport model](../adr/0002-node-transport-model.md) · [Phase 0 design rationale](../superpowers/specs/2026-08-12-mycelium-phase0-design.md) · [Dependency & hardware compatibility](../dependencies.md) · [Model choice & vLLM validation](../superpowers/specs/2026-08-14-issue-6-validate-model-vllm-design.md) · [Node agent vLLM wrapper](../superpowers/specs/2026-08-14-issue-7-node-agent-vllm-wrapper-design.md)
 
 ## Goal
 
@@ -66,7 +66,7 @@ Phase 0 is done when:
 - **Outbound egress from node environments is unverified.** All tests so far confirmed inbound unreachability, not that nodes can dial *out* — and `paramrudra`'s evidence covers its login node only, while the HPC compute node that would actually run vLLM commonly has more restricted egress. Needs testing before the dial-out transport is built.
 - **Node auth mechanism is a placeholder.** A shared pre-issued token per node is the working assumption for Phase 0's closed pool, but this hasn't been locked in.
 - **Exact model choice: resolved.** `Qwen/Qwen2.5-7B-Instruct` was confirmed to run correctly via `vllm serve` on a real target node (`a6000`, single RTX A6000 GPU, pinned via `CUDA_VISIBLE_DEVICES=0`) — a real prompt returned the correct completion. Getting there also required fixing a real dependency-version drift (`nvidia-cuda-nvcc` vs. `nvidia-cuda-runtime`, now corrected in `pyproject.toml`/`uv.lock`). See [the design doc](../superpowers/specs/2026-08-14-issue-6-validate-model-vllm-design.md) for the full investigation.
-- **vLLM must be started with `VLLM_USE_FLASHINFER_SAMPLER=0`.** A packaging inconsistency in flashinfer's bundled CCCL/cub headers breaks its JIT-compiled sampling kernel (unrelated to the CUDA toolchain fix above) — vLLM's own native-sampler fallback works correctly. Issue #7 (node agent wraps vLLM) needs to set this same environment variable when it starts the vLLM process. See [the design doc](../superpowers/specs/2026-08-14-issue-6-validate-model-vllm-design.md) for the full investigation.
+- **vLLM must be started with `VLLM_USE_FLASHINFER_SAMPLER=0`: resolved in code.** A packaging inconsistency in flashinfer's bundled CCCL/cub headers breaks its JIT-compiled sampling kernel (unrelated to the CUDA toolchain fix above) — vLLM's own native-sampler fallback works correctly. The node agent (issue #7) now sets this env var unconditionally every time it starts `vllm serve`, and automatically starts/stops the vLLM subprocess (process-group kill, no orphaned GPU processes — including vLLM's own worker subprocesses, confirmed against real hardware) and forwards prompts to it. See [the node agent design doc](../superpowers/specs/2026-08-14-issue-7-node-agent-vllm-wrapper-design.md) for the implementation decisions and live-hardware verification, and [the original model-choice design doc](../superpowers/specs/2026-08-14-issue-6-validate-model-vllm-design.md) for the underlying investigation.
 
 ## Next step
 

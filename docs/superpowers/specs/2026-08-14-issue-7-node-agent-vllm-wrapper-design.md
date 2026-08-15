@@ -163,6 +163,77 @@ an actual correct completion and confirms no leftover GPU process after
 exit (`nvidia-smi` before/after), following #6's precedent of not
 trusting real-hardware behavior to be identical to a fake stand-in.
 
+## Live verification
+
+Run for real against the `a6000` node
+(`training-framework@192.168.22.23`), after the code above was
+implemented, reviewed (including a final whole-branch review that found
+and fixed a real Critical bug — see below), and tested locally. The repo
+checkout (this branch) was synced to `/mnt/disk1/Framework/mycelium-repo`
+via `rsync` (the repo is private, so a plain `git clone` from the node
+failed on missing credentials — copying the working tree directly sidesteps
+that, matching #6's own precedent of copying files rather than cloning),
+and `uv sync --extra node` installed the pinned stack cleanly, reusing the
+HF cache already populated at `/mnt/disk1/Framework/mycelium-hf-cache`
+from #6 (no re-download needed).
+
+**GPU choice: `--gpu 2`, not `--gpu 0`.** `nvidia-smi` at verification time
+showed GPUs 0, 1, and 3 already carrying other users' workloads (16.8 GB,
+16.8 GB, and 29.4 GB used respectively — this is a shared machine), while
+GPU 2 was fully idle (4 MiB). This is exactly the scenario the `--gpu` CLI
+flag exists for: #6 could hardcode `CUDA_VISIBLE_DEVICES=0` because it
+only had to prove single-GPU fit once; a long-lived node agent needs to
+target whichever card is actually free, which varies run to run.
+
+**One-shot `--prompt` run:**
+
+```
+$ HF_HOME=/mnt/disk1/Framework/mycelium-hf-cache mycelium-node \
+    --prompt "What is the capital of France? Answer in one word." \
+    --gpu 2 --vllm-port 8812
+starting vLLM (Qwen/Qwen2.5-7B-Instruct on GPU 2)...
+[...vLLM startup log, model load, CUDA graph capture...]
+vLLM ready
+Paris
+```
+
+The node agent — not a manually-run `vllm serve` command — started vLLM,
+waited for it to become healthy, forwarded the prompt, and printed the
+correct completion (`"Paris"`, the same prompt/answer #6 verified directly
+against raw vLLM, for continuity). After the process exited, `nvidia-smi`
+showed GPU 2 back at 4 MiB — the full ~14.3 GiB weight + KV-cache
+allocation was released, and `ps aux` showed no leftover `vllm`/
+`mycelium-node` process. This closes acceptance criteria 1 and 3.
+
+**SIGTERM check, long-running mode — closing acceptance criterion 2 on
+real hardware, not just against the test suite's fake process.** The final
+whole-branch review (see the implementation plan's ledger) found a real
+Critical bug here before this: no signal handler existed, so `SIGTERM`/
+`SIGHUP` to the node agent bypassed the `finally: stop vLLM` cleanup
+entirely, orphaning vLLM. That was fixed (`main()` now installs a
+synchronous handler for `SIGTERM`/`SIGHUP`/`SIGINT` that calls
+`process.stop()` directly) and covered by a new automated regression test
+before this live check ran. Re-verified for real: started
+`mycelium-node` in normal (long-running, no `--prompt`) mode against a
+deliberately unreachable coordinator address, confirmed `vllm serve` had
+spawned two child processes under its own process group exactly as
+expected —
+
+```
+$ ps -o pid,pgid,cmd -p <vllm-pid>
+71565  71565  vllm serve Qwen/Qwen2.5-7B-Instruct --host 127.0.0.1 --port 8813
+$ ps --ppid 71565 -o pid,ppid,cmd
+72005  71565  python -c from multiprocessing.resource_tracker import main;main(54)
+72006  71565  VLLM::EngineCore
+```
+
+— sent `SIGTERM` to the node-agent process from outside, and confirmed
+all three (the vLLM leader and both children) were gone within seconds,
+with GPU 2 back to its 4 MiB baseline. This is the real shape the process
+group kill has to handle — vLLM genuinely spawns more than one child
+process — not just the single-child shape the local test fixture
+simulates.
+
 ## Explicitly out of scope for this issue
 
 Node registration, auth-token handling, coordinator-side node registry
