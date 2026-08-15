@@ -22,6 +22,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--cert-file", type=Path, default=DEFAULT_CERT_PATH)
     parser.add_argument("--key-file", type=Path, default=DEFAULT_KEY_PATH)
+    parser.add_argument("--token-file", type=Path, required=True)
     parser.add_argument(
         "--cert-san-ip",
         default=None,
@@ -43,11 +44,13 @@ async def _run(args: argparse.Namespace) -> None:
             )
         certs.ensure_cert(args.cert_file, args.key_file, args.cert_san_ip)
 
+    token = args.token_file.read_text().strip()
+
     print(
         f"mycelium-coordinator {__version__} listening on {args.host}:{args.port}",
         flush=True,
     )
-    async with server.serve(args.host, args.port, args.cert_file, args.key_file):
+    async with server.serve(args.host, args.port, args.cert_file, args.key_file, token):
         await asyncio.Future()  # run forever
 
 
