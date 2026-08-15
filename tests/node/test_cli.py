@@ -219,6 +219,57 @@ async def test_run_registers_with_coordinator_using_token_and_node_id(
     }
 
 
+async def test_run_answers_a_routed_complete_request(tmp_path, monkeypatch, fake_vllm_server):
+    vllm_port = fake_vllm_server.server_address[1]
+    monkeypatch.setattr(
+        vllm_process, "build_command", lambda model, port_: [sys.executable, "-c", "import time; time.sleep(600)"]
+    )
+
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+    token_file = tmp_path / "token"
+    token_file.write_text("secret-token\n")
+
+    reply_event = asyncio.Event()
+    received_reply = {}
+
+    async def fake_coordinator(websocket):
+        await websocket.recv()  # registration
+        await websocket.send(json.dumps({"type": "registered"}))
+        await websocket.send(json.dumps(
+            {"type": "complete", "request_id": "req-1", "prompt": "what is the answer?"}
+        ))
+        received_reply.update(json.loads(await websocket.recv()))
+        reply_event.set()
+        await websocket.wait_closed()
+
+    server_ctx = _server_ssl_context(cert_path, key_path)
+    async with websockets.serve(fake_coordinator, "127.0.0.1", 0, ssl=server_ctx) as coordinator:
+        coord_port = coordinator.sockets[0].getsockname()[1]
+        args = parse_args(
+            [
+                "--coordinator-url", f"wss://127.0.0.1:{coord_port}",
+                "--coordinator-cert", str(cert_path),
+                "--token-file", str(token_file),
+                "--node-id", "test-node",
+                "--vllm-port", str(vllm_port),
+            ]
+        )
+        process = vllm_process.VLLMProcess(model=args.model, gpu=args.gpu, port=args.vllm_port)
+        run_task = asyncio.create_task(_run(args, process))
+        await asyncio.wait_for(reply_event.wait(), timeout=5.0)
+        run_task.cancel()
+        try:
+            await run_task
+        except asyncio.CancelledError:
+            pass
+
+    assert received_reply == {
+        "type": "complete_result", "request_id": "req-1", "text": "fake completion",
+    }
+
+
 async def test_run_retries_after_registration_rejected(tmp_path, monkeypatch, fake_vllm_server):
     vllm_port = fake_vllm_server.server_address[1]
     monkeypatch.setattr(
