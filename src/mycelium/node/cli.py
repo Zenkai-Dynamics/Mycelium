@@ -6,11 +6,12 @@ import argparse
 import asyncio
 import logging
 import signal
+import socket
 import sys
 from pathlib import Path
 
 from mycelium import __version__
-from mycelium.node import connection
+from mycelium.node import connection, registration
 from mycelium.node.vllm_process import (
     DEFAULT_GPU,
     DEFAULT_MODEL,
@@ -24,6 +25,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="mycelium-node")
     parser.add_argument("--coordinator-url", default=None)
     parser.add_argument("--coordinator-cert", type=Path, default=None)
+    parser.add_argument("--token-file", type=Path, default=None)
+    parser.add_argument("--node-id", default=None)
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--gpu", default=DEFAULT_GPU)
     parser.add_argument("--vllm-port", type=int, default=DEFAULT_PORT)
@@ -40,6 +43,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--coordinator-url and --coordinator-cert must be given together")
     if not (has_url and has_cert) and args.prompt is None:
         parser.error("either --coordinator-url/--coordinator-cert or --prompt is required")
+    if has_url and args.token_file is None:
+        parser.error("--token-file is required when connecting to a coordinator")
 
     return args
 
@@ -56,9 +61,19 @@ async def _run(args: argparse.Namespace, process: VLLMProcess) -> None:
             print(result, flush=True)
             return
 
+        token = args.token_file.read_text().strip()
+        node_id = args.node_id or socket.gethostname()
+
         print(f"mycelium-node {__version__} connecting to {args.coordinator_url}", flush=True)
         async for websocket in connection.connect(args.coordinator_url, args.coordinator_cert):
             print(f"connected to coordinator ({args.coordinator_url})", flush=True)
+            try:
+                await registration.register(websocket, token=token, model=args.model, node_id=node_id)
+                print(f"registered with coordinator as {node_id!r}", flush=True)
+            except registration.RegistrationError as exc:
+                print(f"registration failed: {exc}", flush=True)
+                await websocket.close()
+                continue
             try:
                 await websocket.wait_closed()
                 print("connection to coordinator closed, reconnecting...", flush=True)
