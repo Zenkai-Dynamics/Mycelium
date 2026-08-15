@@ -32,6 +32,7 @@ client = []
 [project.scripts]
 mycelium-node = "mycelium.node.cli:main"
 mycelium-coordinator = "mycelium.coordinator.cli:main"
+mycelium-coordinator-status = "mycelium.coordinator.status_cli:main"
 mycelium-client = "mycelium.client.cli:main"
 
 [tool.setuptools.dynamic]
