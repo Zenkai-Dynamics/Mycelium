@@ -50,6 +50,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 async def _run(args: argparse.Namespace, process: VLLMProcess) -> None:
+    token = None
+    node_id = None
+    if args.prompt is None:
+        token = args.token_file.read_text().strip()
+        if not token:
+            raise SystemExit(f"--token-file at {args.token_file} is empty")
+        node_id = args.node_id or socket.gethostname()
+
     print(f"starting vLLM ({args.model} on GPU {args.gpu})...", flush=True)
     await asyncio.to_thread(process.start)
     try:
@@ -60,9 +68,6 @@ async def _run(args: argparse.Namespace, process: VLLMProcess) -> None:
             result = await asyncio.to_thread(process.complete, args.prompt)
             print(result, flush=True)
             return
-
-        token = args.token_file.read_text().strip()
-        node_id = args.node_id or socket.gethostname()
 
         print(f"mycelium-node {__version__} connecting to {args.coordinator_url}", flush=True)
         async for websocket in connection.connect(args.coordinator_url, args.coordinator_cert):

@@ -2,6 +2,7 @@
 
 import pytest
 
+from mycelium.coordinator import certs
 from mycelium.coordinator.cli import parse_args, _run
 
 
@@ -39,4 +40,21 @@ async def test_run_requires_cert_san_ip_when_no_existing_cert(tmp_path):
         ]
     )
     with pytest.raises(SystemExit):
+        await _run(args)
+
+
+async def test_run_rejects_empty_token_file(tmp_path):
+    token_file = tmp_path / "token"
+    token_file.write_text("   \n")
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+    args = parse_args(
+        [
+            "--cert-file", str(cert_path),
+            "--key-file", str(key_path),
+            "--token-file", str(token_file),
+        ]
+    )
+    with pytest.raises(SystemExit, match="empty"):
         await _run(args)

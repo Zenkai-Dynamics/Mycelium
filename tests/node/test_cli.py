@@ -263,6 +263,34 @@ async def test_run_retries_after_registration_rejected(tmp_path, monkeypatch, fa
     assert attempt_count >= 2
 
 
+async def test_run_rejects_empty_token_file_before_starting_vllm(tmp_path, monkeypatch, fake_vllm_server):
+    vllm_port = fake_vllm_server.server_address[1]
+    monkeypatch.setattr(
+        vllm_process, "build_command", lambda model, port_: [sys.executable, "-c", "import time; time.sleep(600)"]
+    )
+    cert_path = tmp_path / "cert.pem"
+    cert_path.write_text("placeholder")
+    token_file = tmp_path / "token"
+    token_file.write_text("  \n")
+
+    args = parse_args(
+        [
+            "--coordinator-url", "wss://127.0.0.1:1",
+            "--coordinator-cert", str(cert_path),
+            "--token-file", str(token_file),
+            "--vllm-port", str(vllm_port),
+        ]
+    )
+    process = vllm_process.VLLMProcess(model=args.model, gpu=args.gpu, port=args.vllm_port)
+
+    with pytest.raises(SystemExit, match="empty"):
+        await _run(args, process)
+
+    # vLLM must never have been started — the empty-token check happens
+    # before process.start(), so there's nothing to clean up here and no
+    # subprocess was spawned.
+
+
 def test_sigterm_stops_vllm_process_group_with_no_orphans(tmp_path):
     """Regression test for the SIGTERM/SIGHUP orphan bug found in final
     review: drives the real CLI as an OS subprocess (not a direct function

@@ -132,3 +132,22 @@ async def test_register_raises_on_non_dict_json_response(tmp_path):
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws:
             with pytest.raises(registration.RegistrationRejected, match="non-dict response"):
                 await registration.register(ws, token="secret", model="m", node_id="node-a")
+
+
+async def test_register_raises_rejected_when_coordinator_closes_without_responding(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async def closing_coordinator(websocket):
+        await websocket.recv()
+        # No response — just close, simulating a coordinator restart or
+        # a network drop between the register message and its ack.
+
+    server_ctx = _server_ssl_context(cert_path, key_path)
+    async with websockets.serve(closing_coordinator, "127.0.0.1", 0, ssl=server_ctx) as fake_server:
+        port = fake_server.sockets[0].getsockname()[1]
+        client_ctx = connection.build_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws:
+            with pytest.raises(registration.RegistrationRejected):
+                await registration.register(ws, token="secret", model="m", node_id="node-a")

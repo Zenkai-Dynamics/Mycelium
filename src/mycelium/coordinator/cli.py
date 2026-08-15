@@ -45,6 +45,8 @@ async def _run(args: argparse.Namespace) -> None:
         certs.ensure_cert(args.cert_file, args.key_file, args.cert_san_ip)
 
     token = args.token_file.read_text().strip()
+    if not token:
+        raise SystemExit(f"--token-file at {args.token_file} is empty")
 
     print(
         f"mycelium-coordinator {__version__} listening on {args.host}:{args.port}",

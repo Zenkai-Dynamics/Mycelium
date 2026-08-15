@@ -13,16 +13,20 @@ from __future__ import annotations
 import asyncio
 import json
 
+import websockets
+
 REGISTRATION_TIMEOUT_SECONDS = 10.0
 
 
 class RegistrationError(Exception):
-    """Base class for registration failures (rejected or timed out)."""
+    """Base class for registration failures (rejected, timed out, or the
+    connection closed before a response arrived)."""
 
 
 class RegistrationRejected(RegistrationError):
-    """Raised when the coordinator rejects the registration, or responds
-    with something other than a clear success."""
+    """Raised when the coordinator rejects the registration, responds with
+    something other than a clear success, or closes the connection before
+    responding at all."""
 
 
 class RegistrationTimeout(RegistrationError):
@@ -38,8 +42,8 @@ async def register(
 ) -> None:
     """Send the registration message and wait for the coordinator's
     response. Returns normally on success. Raises RegistrationRejected if
-    the coordinator rejects the token (or responds unexpectedly), or
-    RegistrationTimeout if no response arrives in time."""
+    the coordinator rejects the token (or closes the connection before
+    responding), or RegistrationTimeout if no response arrives in time."""
     await websocket.send(
         json.dumps({"type": "register", "token": token, "model": model, "node_id": node_id})
     )
@@ -53,6 +57,10 @@ async def register(
             raw = await websocket.recv()
     except TimeoutError:
         raise RegistrationTimeout(f"coordinator did not respond within {timeout}s") from None
+    except websockets.exceptions.ConnectionClosed as exc:
+        raise RegistrationRejected(
+            f"coordinator closed the connection during registration: {exc}"
+        ) from exc
 
     try:
         message = json.loads(raw)

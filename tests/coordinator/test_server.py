@@ -3,6 +3,7 @@
 import asyncio
 import json
 import ssl
+import time
 
 import pytest
 import websockets
@@ -201,3 +202,83 @@ async def test_duplicate_node_id_replaces_and_closes_old_connection(tmp_path):
                 await status_ws.send(json.dumps({"type": "status_query", "token": "secret-token"}))
                 response = json.loads(await status_ws.recv())
                 assert response["nodes"] == [{"node_id": "node-a", "model": "model-b"}]
+
+
+async def test_connection_with_no_message_is_closed_after_timeout(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "FIRST_MESSAGE_TIMEOUT_SECONDS", 0.3)
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws:
+            with pytest.raises(websockets.exceptions.ConnectionClosed):
+                await asyncio.wait_for(ws.recv(), timeout=2.0)
+
+
+async def test_registration_with_non_dict_json_is_closed_not_crashed(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws:
+            await ws.send(json.dumps([1, 2, 3]))  # valid JSON, not a dict
+            with pytest.raises(websockets.exceptions.ConnectionClosed):
+                await ws.recv()
+
+        # Server must still be accepting new connections afterward.
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws2:
+            await ws2.send(json.dumps({"type": "status_query", "token": "secret-token"}))
+            response = json.loads(await ws2.recv())
+            assert response == {"type": "status", "nodes": []}
+
+
+async def test_registration_with_null_token_is_rejected_not_crashed(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws:
+            await ws.send(json.dumps(
+                {"type": "register", "token": None, "model": "m", "node_id": "node-a"}
+            ))
+            response = json.loads(await ws.recv())
+            assert response["type"] == "registration_rejected"
+
+
+async def test_duplicate_node_id_registration_acks_promptly_even_if_old_connection_is_unresponsive(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        old_ws = await websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx)
+        await old_ws.send(json.dumps(
+            {"type": "register", "token": "secret-token", "model": "model-a", "node_id": "node-a"}
+        ))
+        await old_ws.recv()
+        # Simulate a zombie connection: stop reading, so it can't complete
+        # a close handshake promptly when the coordinator later closes it.
+        old_ws.transport.pause_reading()
+
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as new_ws:
+            await new_ws.send(json.dumps(
+                {"type": "register", "token": "secret-token", "model": "model-b", "node_id": "node-a"}
+            ))
+            start = time.monotonic()
+            response = json.loads(await asyncio.wait_for(new_ws.recv(), timeout=3.0))
+            elapsed = time.monotonic() - start
+            assert response == {"type": "registered"}
+            assert elapsed < 2.0, (
+                f"ack took {elapsed:.2f}s — must not block on closing a zombie superseded connection"
+            )

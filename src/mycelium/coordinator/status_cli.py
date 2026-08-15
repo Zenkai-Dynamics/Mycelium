@@ -10,11 +10,19 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sys
 from pathlib import Path
 
 import websockets
 
 from mycelium.node.connection import build_ssl_context
+
+STATUS_QUERY_TIMEOUT_SECONDS = 10.0
+
+
+class QueryError(Exception):
+    """Raised when the status query fails: the coordinator rejected it
+    (wrong/missing token) or didn't respond in time."""
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -25,12 +33,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-async def query_status(coordinator_url: str, coordinator_cert: Path, token: str) -> list[dict]:
-    """Connect, ask for the current registry, and return the node list."""
+async def query_status(
+    coordinator_url: str,
+    coordinator_cert: Path,
+    token: str,
+    timeout: float = STATUS_QUERY_TIMEOUT_SECONDS,
+) -> list[dict]:
+    """Connect, ask for the current registry, and return the node list.
+
+    Raises QueryError if the coordinator rejects the query (e.g. a wrong
+    token — it closes without replying) or doesn't respond in time."""
     ssl_context = build_ssl_context(coordinator_cert)
     async with websockets.connect(coordinator_url, ssl=ssl_context) as websocket:
         await websocket.send(json.dumps({"type": "status_query", "token": token}))
-        raw = await websocket.recv()
+        try:
+            async with asyncio.timeout(timeout):
+                raw = await websocket.recv()
+        except TimeoutError:
+            raise QueryError(f"coordinator did not respond within {timeout}s") from None
+        except websockets.exceptions.ConnectionClosed:
+            raise QueryError(
+                "coordinator rejected the status query (check --token-file)"
+            ) from None
         message = json.loads(raw)
         return message.get("nodes", [])
 
@@ -38,7 +62,11 @@ async def query_status(coordinator_url: str, coordinator_cert: Path, token: str)
 def main() -> None:
     args = parse_args()
     token = args.token_file.read_text().strip()
-    nodes = asyncio.run(query_status(args.coordinator_url, args.coordinator_cert, token))
+    try:
+        nodes = asyncio.run(query_status(args.coordinator_url, args.coordinator_cert, token))
+    except QueryError as exc:
+        print(f"error: {exc}", flush=True)
+        sys.exit(1)
     if not nodes:
         print("No nodes registered.")
         return

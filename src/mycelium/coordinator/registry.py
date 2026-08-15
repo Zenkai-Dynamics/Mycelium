@@ -24,11 +24,22 @@ class NodeRegistry:
     """Holds the shared token and the current set of registered nodes."""
 
     def __init__(self, token: str) -> None:
+        if not token:
+            raise ValueError("token must not be empty")
         self._token = token
         self._nodes: dict[str, Node] = {}
 
-    def check_token(self, token: str) -> bool:
-        return hmac.compare_digest(token, self._token)
+    def check_token(self, token: Any) -> bool:
+        """Constant-time comparison against the configured token. Returns
+        False (never raises) for a token that isn't a comparable str —
+        e.g. a client sending {"token": null} or a non-ASCII value, both
+        of which would otherwise raise inside hmac.compare_digest."""
+        if not isinstance(token, str):
+            return False
+        try:
+            return hmac.compare_digest(token, self._token)
+        except TypeError:
+            return False
 
     def register(self, node_id: str, model: str, websocket: Any) -> Node | None:
         """Add or replace node_id's entry. Returns the superseded Node if

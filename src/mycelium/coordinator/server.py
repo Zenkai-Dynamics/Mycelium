@@ -21,6 +21,17 @@ PING_INTERVAL_SECONDS = 20
 PING_TIMEOUT_SECONDS = 20
 FIRST_MESSAGE_TIMEOUT_SECONDS = 10.0
 
+# Fire-and-forget cleanup tasks (closing a superseded connection) must keep
+# a reference somewhere, or asyncio may garbage-collect them mid-execution.
+# This module-level set is that reference; each task removes itself when done.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _close_in_background(websocket) -> None:
+    task = asyncio.create_task(websocket.close())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
 
 async def _handle_node(websocket, registry: NodeRegistry) -> None:
     """Read the first message (a registration or a status query) and
@@ -30,13 +41,21 @@ async def _handle_node(websocket, registry: NodeRegistry) -> None:
     message within the timeout, malformed JSON, an unrecognized type —
     closes the connection."""
     try:
-        raw = await asyncio.wait_for(websocket.recv(), timeout=FIRST_MESSAGE_TIMEOUT_SECONDS)
+        # asyncio.timeout(), not asyncio.wait_for() — see registration.py's
+        # matching comment: wait_for has a Python 3.11 cancellation race
+        # this side is equally exposed to.
+        async with asyncio.timeout(FIRST_MESSAGE_TIMEOUT_SECONDS):
+            raw = await websocket.recv()
     except (TimeoutError, websockets.exceptions.ConnectionClosed):
         return
 
     try:
         message = json.loads(raw)
     except json.JSONDecodeError:
+        await websocket.close()
+        return
+
+    if not isinstance(message, dict):
         await websocket.close()
         return
 
@@ -54,7 +73,7 @@ async def _handle_node(websocket, registry: NodeRegistry) -> None:
 
 
 async def _handle_status_query(websocket, registry: NodeRegistry, message: dict) -> None:
-    if not registry.check_token(message.get("token", "")):
+    if not registry.check_token(message.get("token")):
         await websocket.close()
         return
     await websocket.send(json.dumps({"type": "status", "nodes": registry.list_nodes()}))
@@ -62,7 +81,7 @@ async def _handle_status_query(websocket, registry: NodeRegistry, message: dict)
 
 
 async def _handle_registration(websocket, registry: NodeRegistry, message: dict) -> None:
-    if not registry.check_token(message.get("token", "")):
+    if not registry.check_token(message.get("token")):
         await websocket.send(json.dumps(
             {"type": "registration_rejected", "reason": "invalid or missing token"}
         ))
@@ -79,10 +98,14 @@ async def _handle_registration(websocket, registry: NodeRegistry, message: dict)
         return
 
     superseded = registry.register(node_id, model, websocket)
-    if superseded is not None:
-        await superseded.websocket.close()
-
+    # Ack the new connection FIRST — closing a superseded connection can
+    # block for its full close_timeout if that connection is a half-dead
+    # zombie (the common case: a node reconnecting after a network blip,
+    # before the old socket's own ping/pong has noticed it's gone). The
+    # new node's registration must not wait behind that cleanup.
     await websocket.send(json.dumps({"type": "registered"}))
+    if superseded is not None:
+        _close_in_background(superseded.websocket)
 
     try:
         async for _message in websocket:

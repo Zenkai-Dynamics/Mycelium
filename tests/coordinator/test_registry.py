@@ -1,5 +1,7 @@
 """Tests for mycelium.coordinator.registry."""
 
+import pytest
+
 from mycelium.coordinator.registry import NodeRegistry
 
 
@@ -54,3 +56,15 @@ def test_unregister_does_not_remove_a_newer_replacement():
     # its own (now-superseded) entry — must not delete the newer one.
     registry.unregister("node-a", websocket="ws-old")
     assert registry.list_nodes() == [{"node_id": "node-a", "model": "model-b"}]
+
+
+def test_registry_rejects_empty_token():
+    with pytest.raises(ValueError):
+        NodeRegistry("")
+
+
+def test_check_token_rejects_non_string_token():
+    registry = NodeRegistry("secret")
+    assert registry.check_token(None) is False
+    assert registry.check_token(123) is False
+    assert registry.check_token(["secret"]) is False
