@@ -282,3 +282,57 @@ async def test_duplicate_node_id_registration_acks_promptly_even_if_old_connecti
             assert elapsed < 2.0, (
                 f"ack took {elapsed:.2f}s — must not block on closing a zombie superseded connection"
             )
+
+
+async def test_silently_unresponsive_node_is_dropped_within_ping_timeout_window(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "PING_INTERVAL_SECONDS", 0.2)
+    monkeypatch.setattr(server, "PING_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(server, "CLOSE_TIMEOUT_SECONDS", 0.2)
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        node_ws = await websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx)
+        await node_ws.send(json.dumps(
+            {"type": "register", "token": "secret-token", "model": "m", "node_id": "node-a"}
+        ))
+        await node_ws.recv()  # consume the "registered" ack
+
+        # Confirm the node appears in the registry before the liveness window
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as status_ws:
+            await status_ws.send(json.dumps({"type": "status_query", "token": "secret-token"}))
+            response = json.loads(await status_ws.recv())
+            assert response == {
+                "type": "status",
+                "nodes": [{"node_id": "node-a", "model": "m"}],
+            }
+
+        # Simulate the node going silent (network partition, frozen process):
+        # stop processing incoming bytes, so it can never answer a ping with
+        # a pong, and can never complete the close handshake the coordinator
+        # starts after that — without ever sending a WebSocket close frame
+        # itself. This is a different failure mode than
+        # test_disconnected_node_is_removed_from_registry (clean close) or
+        # test_server_survives_abnormal_disconnect (abrupt transport close)
+        # — neither of those goes through the ping/pong timeout path this
+        # test targets.
+        node_ws.transport.pause_reading()
+
+        # Worst case per the design doc for issue #9: PING_INTERVAL_SECONDS
+        # to notice the silence, PING_TIMEOUT_SECONDS for the pong that
+        # never arrives, then CLOSE_TIMEOUT_SECONDS waiting for a close
+        # handshake the silent peer can never complete.
+        await asyncio.sleep(
+            server.PING_INTERVAL_SECONDS
+            + server.PING_TIMEOUT_SECONDS
+            + server.CLOSE_TIMEOUT_SECONDS
+            + 1.0
+        )
+
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as status_ws:
+            await status_ws.send(json.dumps({"type": "status_query", "token": "secret-token"}))
+            response = json.loads(await status_ws.recv())
+            assert response["nodes"] == []
