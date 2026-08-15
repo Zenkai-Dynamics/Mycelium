@@ -44,8 +44,14 @@ async def register(
         json.dumps({"type": "register", "token": token, "model": model, "node_id": node_id})
     )
     try:
-        raw = await asyncio.wait_for(websocket.recv(), timeout=timeout)
-    except TimeoutError as exc:
+        # asyncio.timeout(), not asyncio.wait_for(): wait_for has a known
+        # race on this Python version where a Task.cancel() landing at the
+        # same instant the wrapped awaitable completes can be silently
+        # swallowed, leaking the cancellation and hanging the caller's next
+        # await forever. asyncio.timeout() doesn't have that failure mode.
+        async with asyncio.timeout(timeout):
+            raw = await websocket.recv()
+    except TimeoutError:
         raise RegistrationTimeout(f"coordinator did not respond within {timeout}s") from None
 
     try:
