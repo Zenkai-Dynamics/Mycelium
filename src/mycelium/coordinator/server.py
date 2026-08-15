@@ -19,6 +19,7 @@ from mycelium.coordinator.registry import NodeRegistry
 
 PING_INTERVAL_SECONDS = 20
 PING_TIMEOUT_SECONDS = 20
+CLOSE_TIMEOUT_SECONDS = 10
 FIRST_MESSAGE_TIMEOUT_SECONDS = 10.0
 
 # Fire-and-forget cleanup tasks (closing a superseded connection) must keep
@@ -142,4 +143,5 @@ def serve(host: str, port: int, cert_path: Path, key_path: Path, token: str):
         ssl=ssl_context,
         ping_interval=PING_INTERVAL_SECONDS,
         ping_timeout=PING_TIMEOUT_SECONDS,
+        close_timeout=CLOSE_TIMEOUT_SECONDS,
     )
