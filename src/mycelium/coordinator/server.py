@@ -8,7 +8,8 @@ CLOSE_TIMEOUT_SECONDS below) — see the design doc for issue #9: a node
 that goes silent gets its connection closed by the `websockets` library
 itself, which `_handle_registration`'s `finally: registry.unregister(...)`
 already turns into a registry drop, the same as any other disconnect.
-Routing a client request (#10) is not this module's job yet.
+Routing a client request to a healthy node (#10) is handled by the
+`"complete"` branch below and mycelium.coordinator.router.
 """
 
 from __future__ import annotations
@@ -20,7 +21,8 @@ from pathlib import Path
 
 import websockets
 
-from mycelium.coordinator.registry import NodeRegistry
+from mycelium.coordinator import router
+from mycelium.coordinator.registry import Node, NodeRegistry
 
 # These three also double as #9's node-liveness mechanism: a silent node
 # (no pong within PING_TIMEOUT_SECONDS of a ping) has the library start a
@@ -49,9 +51,10 @@ def _close_in_background(websocket) -> None:
 
 
 async def _handle_node(websocket, registry: NodeRegistry) -> None:
-    """Read the first message (a registration or a status query) and
-    dispatch on it. A registered node's connection is then held open with
-    no further business logic yet (that's #10's job); a status query
+    """Read the first message and dispatch on it: a node registration, a
+    status query, or a client's completion request. A registered node's
+    connection is then held open for routed requests (see
+    _handle_registration below); a status query or completion request
     gets one response and the connection closes. Anything else — no
     message within the timeout, malformed JSON, an unrecognized type —
     closes the connection."""
@@ -84,7 +87,73 @@ async def _handle_node(websocket, registry: NodeRegistry) -> None:
         await _handle_registration(websocket, registry, message)
         return
 
+    if message_type == "complete":
+        await _handle_complete_request(websocket, registry, message)
+        return
+
     await websocket.close()
+
+
+async def _handle_complete_request(websocket, registry: NodeRegistry, message: dict) -> None:
+    """A client's one-shot completion request: authenticate, pick a
+    healthy node hosting the requested model, forward, relay the result
+    (or a clear error) back, then close — see the design doc for issue
+    #10."""
+    if not registry.check_token(message.get("token")):
+        await websocket.close()
+        return
+
+    model = message.get("model")
+    prompt = message.get("prompt")
+    if not model or not prompt:
+        try:
+            await websocket.send(json.dumps(
+                {"type": "complete_error", "reason": "model and prompt are required"}
+            ))
+        except websockets.exceptions.ConnectionClosed:
+            return
+        await websocket.close()
+        return
+
+    try:
+        node = registry.find_node_for_model(model)
+        if node is None:
+            raise router.NoHealthyNodeError(f"no healthy node for model {model!r}")
+        text = await router.route_request(node, prompt)
+    except router.RoutingError as exc:
+        try:
+            await websocket.send(json.dumps({"type": "complete_error", "reason": str(exc)}))
+        except websockets.exceptions.ConnectionClosed:
+            return
+        await websocket.close()
+        return
+
+    try:
+        await websocket.send(json.dumps({"type": "complete_result", "text": text}))
+    except websockets.exceptions.ConnectionClosed:
+        return
+    await websocket.close()
+
+
+def _dispatch_node_message(node: Node, raw: str) -> None:
+    """Resolve the pending future for a complete_result/complete_error
+    reply from a registered node. Anything else — malformed JSON, an
+    unrecognized type, a request_id with no matching pending future (e.g.
+    a very late reply after route_request already gave up) — is silently
+    ignored: this connection has no other job than routed request/response
+    after registration, and there's no client left to usefully report a
+    problem to."""
+    try:
+        message = json.loads(raw)
+    except json.JSONDecodeError:
+        return
+    if not isinstance(message, dict):
+        return
+    if message.get("type") not in ("complete_result", "complete_error"):
+        return
+    future = node.pending.get(message.get("request_id"))
+    if future is not None and not future.done():
+        future.set_result(message)
 
 
 async def _handle_status_query(websocket, registry: NodeRegistry, message: dict) -> None:
@@ -113,6 +182,11 @@ async def _handle_registration(websocket, registry: NodeRegistry, message: dict)
         return
 
     superseded = registry.register(node_id, model, websocket)
+    # Captured once, right now — never re-fetched from the registry later.
+    # If this node reconnects again before this connection's cleanup runs,
+    # a fresh registry.get(node_id) at that point would return the *newer*
+    # connection's Node, not this one. See the design doc for issue #10.
+    node = registry.get(node_id)
     # Ack the new connection FIRST — closing a superseded connection can
     # block for its full close_timeout if that connection is a half-dead
     # zombie (the common case: a node reconnecting after a network blip,
@@ -123,12 +197,23 @@ async def _handle_registration(websocket, registry: NodeRegistry, message: dict)
         _close_in_background(superseded.websocket)
 
     try:
-        async for _message in websocket:
-            pass
+        async for raw in websocket:
+            _dispatch_node_message(node, raw)
     except websockets.exceptions.ConnectionClosed:
         pass
     finally:
         registry.unregister(node_id, websocket)
+        # Anything still waiting on this connection (issue #10) needs to
+        # fail now, not sit out the full route_request timeout for a node
+        # that's already visibly gone — whether cleanly closed, silently
+        # timed out via ping/pong (#9), or superseded by a reconnect
+        # (_close_in_background above, which triggers this same cleanup
+        # for the *old* connection's own _handle_registration task).
+        for pending_future in node.pending.values():
+            if not pending_future.done():
+                pending_future.set_exception(
+                    router.NodeDisconnectedError(f"node {node_id!r} disconnected mid-request")
+                )
 
 
 def build_ssl_context(cert_path: Path, key_path: Path) -> ssl.SSLContext:

@@ -8,8 +8,9 @@ since plain dict operations don't yield control mid-mutation.
 
 from __future__ import annotations
 
+import asyncio
 import hmac
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -18,6 +19,13 @@ class Node:
     node_id: str
     model: str
     websocket: Any
+    # In-flight routed requests on this node's connection, keyed by
+    # request_id — see the design doc for issue #10. Lives on the Node
+    # itself (not a separate coordinator-wide dict) so it's tied to this
+    # exact connection's lifetime: when the connection goes away, whoever
+    # cleans it up already has this dict via the Node reference they
+    # captured at registration time.
+    pending: dict[str, asyncio.Future] = field(default_factory=dict)
 
 
 class NodeRegistry:
@@ -55,6 +63,28 @@ class NodeRegistry:
         current = self._nodes.get(node_id)
         if current is not None and current.websocket is websocket:
             del self._nodes[node_id]
+
+    def find_node_for_model(self, model: str) -> Node | None:
+        """Return the first registered node hosting `model`, or None. No
+        load balancing across same-model nodes — see the design doc for
+        issue #10: Phase 0 doesn't need fairness, just a healthy match."""
+        for node in self._nodes.values():
+            if node.model == model:
+                return node
+        return None
+
+    def get(self, node_id: str) -> Node | None:
+        """Return the currently-registered Node for node_id, or None.
+
+        Used by the connection-handling task right after it calls
+        register(), to capture a stable reference to its own entry for
+        later cleanup — see the design doc for issue #10 on why that
+        reference must be captured once and never re-fetched later: a
+        later re-fetch could return a *different* connection's Node if
+        this one has since been superseded by a reconnect under the same
+        node_id.
+        """
+        return self._nodes.get(node_id)
 
     def list_nodes(self) -> list[dict]:
         return [{"node_id": n.node_id, "model": n.model} for n in self._nodes.values()]

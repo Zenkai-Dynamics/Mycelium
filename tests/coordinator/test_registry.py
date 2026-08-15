@@ -68,3 +68,50 @@ def test_check_token_rejects_non_string_token():
     assert registry.check_token(None) is False
     assert registry.check_token(123) is False
     assert registry.check_token(["secret"]) is False
+
+
+def test_find_node_for_model_returns_matching_node():
+    registry = NodeRegistry("secret")
+    registry.register("node-a", "model-a", websocket="ws-a")
+    node = registry.find_node_for_model("model-a")
+    assert node is not None
+    assert node.node_id == "node-a"
+
+
+def test_find_node_for_model_returns_none_when_no_match():
+    registry = NodeRegistry("secret")
+    registry.register("node-a", "model-a", websocket="ws-a")
+    assert registry.find_node_for_model("model-b") is None
+
+
+def test_find_node_for_model_returns_none_when_registry_empty():
+    registry = NodeRegistry("secret")
+    assert registry.find_node_for_model("model-a") is None
+
+
+def test_find_node_for_model_returns_first_match_when_multiple_host_same_model():
+    registry = NodeRegistry("secret")
+    registry.register("node-a", "model-a", websocket="ws-a")
+    registry.register("node-b", "model-a", websocket="ws-b")
+    node = registry.find_node_for_model("model-a")
+    assert node.node_id == "node-a"
+
+
+def test_get_returns_registered_node():
+    registry = NodeRegistry("secret")
+    registry.register("node-a", "model-a", websocket="ws-a")
+    node = registry.get("node-a")
+    assert node is not None
+    assert node.node_id == "node-a"
+    assert node.websocket == "ws-a"
+
+
+def test_get_returns_none_for_unknown_node_id():
+    registry = NodeRegistry("secret")
+    assert registry.get("node-a") is None
+
+
+def test_new_node_has_empty_pending_dict():
+    registry = NodeRegistry("secret")
+    registry.register("node-a", "model-a", websocket="ws-a")
+    assert registry.get("node-a").pending == {}

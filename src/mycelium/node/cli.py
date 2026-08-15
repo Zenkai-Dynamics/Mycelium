@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 from mycelium import __version__
-from mycelium.node import connection, registration
+from mycelium.node import connection, registration, request_handler
 from mycelium.node.vllm_process import (
     DEFAULT_GPU,
     DEFAULT_MODEL,
@@ -84,7 +84,7 @@ async def _run(args: argparse.Namespace, process: VLLMProcess) -> None:
                 await asyncio.sleep(delay)
                 continue
             try:
-                await websocket.wait_closed()
+                await request_handler.handle_messages(websocket, process)
                 print("connection to coordinator closed, reconnecting...", flush=True)
             except Exception:
                 continue
