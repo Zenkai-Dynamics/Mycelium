@@ -5,6 +5,7 @@ import json
 
 import pytest
 import websockets
+from websockets.exceptions import ConnectionClosedError
 
 from mycelium.coordinator import router
 from mycelium.coordinator.registry import Node
@@ -91,7 +92,7 @@ async def test_route_request_raises_timeout_when_no_reply_arrives():
 
 async def test_route_request_raises_disconnected_when_send_fails():
     websocket = _FakeNodeWebsocket(
-        send_raises=websockets.ConnectionClosedError(None, None)
+        send_raises=websockets.exceptions.ConnectionClosedError(None, None)
     )
     node = _make_node(websocket)
 

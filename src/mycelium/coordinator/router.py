@@ -17,6 +17,7 @@ import json
 import uuid
 
 import websockets
+from websockets.exceptions import ConnectionClosed
 
 from mycelium.coordinator.registry import Node
 
@@ -73,7 +74,7 @@ async def route_request(
             await node.websocket.send(
                 json.dumps({"type": "complete", "request_id": request_id, "prompt": prompt})
             )
-        except websockets.ConnectionClosed as exc:
+        except websockets.exceptions.ConnectionClosed as exc:
             raise NodeDisconnectedError(f"node {node.node_id!r} disconnected: {exc}") from exc
 
         try:
