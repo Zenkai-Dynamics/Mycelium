@@ -154,6 +154,69 @@ registry (register/replace/unregister, token check). `server.py`'s
 `mycelium/coordinator/status_cli.py` (new) — the
 `mycelium-coordinator-status` entry point.
 
+## Live verification
+
+Run for real against the `a6000` node (`training-framework@192.168.22.23`)
+after implementation, a final whole-branch review, and one approved
+addendum fix (see below) were all complete. Both the coordinator and the
+node ran on `a6000` itself — #5 already proved real cross-machine dial-out
+connectivity separately, so this verification is scoped to what #8 adds
+on top of that already-proven transport: the registration protocol
+itself, not network reachability again.
+
+A real random token (`openssl rand -hex 32`) was written to a token file;
+`mycelium-coordinator` started against it. `mycelium-node --gpu 2` (GPU 2
+was idle at verification time — GPUs 0/1/3 were carrying other users'
+workloads on this shared machine) started a real `vllm serve
+Qwen/Qwen2.5-7B-Instruct` and registered:
+
+```
+$ mycelium-node --coordinator-url wss://127.0.0.1:8765 \
+    --coordinator-cert coord-cert.pem --token-file token.txt \
+    --node-id a6000-live-verify --gpu 2
+[...vLLM startup...]
+vLLM ready
+mycelium-node 0.1.0 connecting to wss://127.0.0.1:8765
+connected to coordinator (wss://127.0.0.1:8765)
+registered with coordinator as 'a6000-live-verify'
+
+$ mycelium-coordinator-status --coordinator-url wss://127.0.0.1:8765 \
+    --coordinator-cert coord-cert.pem --token-file token.txt
+a6000-live-verify: Qwen/Qwen2.5-7B-Instruct
+```
+
+This closes acceptance criteria 1 and 3. Criterion 2 (invalid/missing
+token rejected) was verified two ways against the same live coordinator:
+`mycelium-coordinator-status` with a wrong token file printed `error:
+coordinator rejected the status query (check --token-file)` and exited
+non-zero, rather than a raw traceback; and a raw registration message
+with an intentionally wrong token, sent directly against the real running
+coordinator, returned `{"type": "registration_rejected", "reason":
+"invalid or missing token"}` — and the imposter node never appeared in a
+follow-up status query, confirming rejection happens before any registry
+mutation, not just cosmetically at the response level.
+
+Finally, `SIGTERM` to the real node process — combining issue #7's
+signal-handling fix with #8's registration — confirmed the full stack
+shuts down cleanly: the node process exited, `vllm serve` and its
+process group were gone (`nvidia-smi` back to GPU 2's 4 MiB idle
+baseline), and a follow-up status query showed `No nodes registered.`,
+confirming the coordinator's disconnect-cleanup path fired for real, not
+just in the local test suite's simulated disconnects.
+
+**Addendum fix, found and fixed after the final review, before this live
+run:** the final review's own fix-wave re-review independently discovered
+a real, pre-existing bug — a node retrying registration after a failure
+on an *already-open* connection (wrong token, or the coordinator closing
+mid-handshake) had no backoff, because `websockets`' reconnect backoff
+only applies between failed TCP connections, not failed registrations on
+a successful one; verified at ~400-420 attempts/second sustained. Fixed
+by reusing `connection.reconnect_delays()` for registration failures too,
+resetting after a successful registration. The user was consulted and
+explicitly chose to fix this in the same PR rather than file a follow-up
+issue, given the live-verification step right after it would otherwise
+have hammered the coordinator during exactly this kind of test.
+
 ## Explicitly out of scope for this issue
 
 Heartbeat/liveness tracking after registration succeeds, and dropping a
