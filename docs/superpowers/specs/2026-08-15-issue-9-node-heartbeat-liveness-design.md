@@ -53,16 +53,17 @@ ping_interval=PING_INTERVAL_SECONDS)` call, which already sends ping
 frames to the coordinator on a fixed interval today.
 
 **Detection window: keep `PING_INTERVAL_SECONDS = 20` /
-`PING_TIMEOUT_SECONDS = 20` unchanged, document the derived ~40s
-worst-case bound.** These values were already chosen and live-verified
-by #5/#8; retuning them is a separate concern from #9's job (proving and
+`PING_TIMEOUT_SECONDS = 20` unchanged, document the derived worst-case
+bound.** These values were already chosen and live-verified by #5/#8;
+retuning them is a separate concern from #9's job (proving and
 documenting liveness tracking, not re-optimizing its latency). Worst
 case: a ping is sent right as a node goes silent (up to
 `PING_INTERVAL_SECONDS` late to notice) plus the full
-`PING_TIMEOUT_SECONDS` wait for a pong that never arrives — so ~40s from
-"node goes silent" to "dropped from the registry." That figure is this
-design's answer to the acceptance criterion's "bounded, documented time
-window."
+`PING_TIMEOUT_SECONDS` wait for a pong that never arrives, **plus a third
+factor found during implementation: `close_timeout`** (see the addendum
+below) — ~50s total from "node goes silent" to "dropped from the
+registry." That figure is this design's answer to the acceptance
+criterion's "bounded, documented time window."
 
 **Scope: coordinator tracking node liveness only, not the reverse.**
 Issue #9's text and acceptance criteria are entirely about the
@@ -93,22 +94,21 @@ calls `old_ws.transport.pause_reading()` to make a real client stop
 processing incoming frames (including pings) without closing the
 connection. #9's new test — in the same file, immediately after that
 one — registers a node, pauses its transport's reading the same way,
-monkeypatches `PING_INTERVAL_SECONDS`/`PING_TIMEOUT_SECONDS` down to
-sub-second values (matching the existing
+monkeypatches `PING_INTERVAL_SECONDS`/`PING_TIMEOUT_SECONDS`/
+`CLOSE_TIMEOUT_SECONDS` down to sub-second values (matching the existing
 `test_connection_with_no_message_is_closed_after_timeout` pattern for
-`FIRST_MESSAGE_TIMEOUT_SECONDS`) so the test doesn't take 40 real
+`FIRST_MESSAGE_TIMEOUT_SECONDS`) so the test doesn't take 50 real
 seconds, and asserts a subsequent status query no longer lists the node
 once the timeout has elapsed. No new test infrastructure.
 
-**Code gets a short comment, not a new constant.** A comment above
-`PING_INTERVAL_SECONDS`/`PING_TIMEOUT_SECONDS` in `server.py` will note
-that these values now double as #9's heartbeat/liveness mechanism and
-state the derived ~40s worst-case bound — matching this file's existing
-habit of explaining non-obvious reasoning inline (e.g. the
-`_close_in_background` comment). No new named constant: the two existing
-constants are already the complete, correct source of truth, and a
-third derived constant would just be something to keep in sync with
-them for no behavioral purpose.
+**Code gets a comment, plus one new constant for the factor discovered
+during implementation.** A comment above `PING_INTERVAL_SECONDS`/
+`PING_TIMEOUT_SECONDS`/`CLOSE_TIMEOUT_SECONDS` in `server.py` notes that
+these values now double as #9's heartbeat/liveness mechanism and states
+the derived ~50s worst-case bound — matching this file's existing habit
+of explaining non-obvious reasoning inline (e.g. the
+`_close_in_background` comment). See the addendum below for why a third
+constant, `CLOSE_TIMEOUT_SECONDS`, was added after all.
 
 **Docstring cleanup.** `server.py`, `connection.py`, and
 `registration.py` each currently have a comment or docstring line
@@ -117,18 +117,55 @@ docstring: "Heartbeat/liveness tracking beyond registration (#9)... are
 not this module's job yet"). These get updated to reflect that #9 is
 now done, since #9 is exactly the change that makes those lines stale.
 
+## Addendum: `close_timeout` also matters (found during implementation)
+
+The first implementation attempt's regression test failed — not because
+of a bug, but because the ~40s figure above was incomplete.
+`websockets.asyncio.server.serve()` has a third relevant parameter,
+`close_timeout` (library default `10`), that `server.serve()` never
+passed. Tracing the library source (`websockets/asyncio/connection.py`):
+on a ping timeout, the library doesn't close the transport immediately —
+it starts a close handshake and sets `close_deadline = now +
+close_timeout`, only forcing the transport shut once that deadline
+passes. A genuinely silent peer (the exact case #9 is about) can never
+complete that handshake, so it always burns the full `close_timeout` on
+top of `ping_interval + ping_timeout`. Confirmed experimentally: the
+test failed at a 0.7s wait and passed cleanly once the wait accounted
+for the extra ~10s.
+
+**Decision: name `close_timeout` explicitly rather than leave it as an
+implicit library default.** `CLOSE_TIMEOUT_SECONDS = 10` is added to
+`server.py`, matching the existing `PING_INTERVAL_SECONDS`/
+`PING_TIMEOUT_SECONDS`/`FIRST_MESSAGE_TIMEOUT_SECONDS` naming pattern,
+and passed explicitly to `websockets.serve(...,
+close_timeout=CLOSE_TIMEOUT_SECONDS)`. No behavior change — it's the
+same value the library already defaulted to. What changes is that the
+true worst-case bound is now traceable to a real symbol in this
+codebase instead of depending on an unstated library default that could
+silently drift on a future `websockets` upgrade. The alternative
+(leaving it implicit and just correcting the documented number) was
+considered and rejected: it would leave Mycelium's own stated liveness
+guarantee resting on a number that isn't visible anywhere in Mycelium's
+own source.
+
+**Revised bound: `PING_INTERVAL_SECONDS + PING_TIMEOUT_SECONDS +
+CLOSE_TIMEOUT_SECONDS` ≈ 50s** (20 + 20 + 10), superseding the ~40s
+figure above.
+
 ## What actually changes
 
-- `src/mycelium/coordinator/server.py` — a comment above the ping
+- `src/mycelium/coordinator/server.py` — new `CLOSE_TIMEOUT_SECONDS`
+  constant, passed to `websockets.serve()`; a comment above the three
   constants; docstring update.
 - `src/mycelium/node/connection.py` — docstring update only (no ping/pong
   behavior change; documents that these constants now serve #9 too).
 - `src/mycelium/node/registration.py` — docstring update only.
 - `tests/coordinator/test_server.py` — one new test.
 - `docs/phases/phase-0-foundation.md` — note the resolved mechanism and
-  the ~40s bound.
+  the ~50s bound.
 
-No new modules, no new message types, no changed default timeouts, no
+No new modules, no new message types, no changed default *values*
+(`CLOSE_TIMEOUT_SECONDS` matches the library default it replaces), no
 new CLI flags.
 
 ## Explicitly out of scope for this issue
