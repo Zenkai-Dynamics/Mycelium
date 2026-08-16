@@ -1,7 +1,7 @@
 # Issue #13 — Migrate `pyproject.toml` License Metadata to PEP 639 — Design
 
 Date: 2026-08-16
-Status: Approved, not yet implemented
+Status: Live-verified, gate resolved — migration approved to land
 Issue: [#13 — Migrate pyproject.toml license metadata to PEP 639](https://github.com/Zenkai-Dynamics/Mycelium/issues/13)
 
 This is the condensed record of the decisions made while brainstorming
@@ -93,6 +93,54 @@ exercises `pip install -e .` (confirmed: `tests/` has no such coverage,
 `.github/workflows/` doesn't exist) — consistent with issue #1's original
 decision to keep packaging verification manual/live-checked rather than
 add CI machinery ahead of need. This issue doesn't change that.
+
+## Live verification (2026-08-16)
+
+A minimal checkout (`pyproject.toml` with the four PEP 639 changes
+already applied, `LICENSE`, `Readme.md`, and `src/mycelium/__init__.py`
+— enough for `[tool.setuptools.packages.find]`/`[tool.setuptools.dynamic]`
+to resolve, without the rest of the source tree) was copied to each of
+the three candidate nodes and installed with `uv venv` + `uv pip install
+-e .` — the exact command sequence `docs/SETUP.md` already documents as
+the supported install path (not bare `pip`, and not `python3 -m venv`,
+which `docs/dependencies.md` separately notes lacks `ensurepip` on at
+least one candidate node).
+
+| Node | `uv` location | Python (via `uv venv`) | Result |
+|---|---|---|---|
+| `a6000` | `~/.local/bin/uv` (not on default non-interactive `PATH`) | 3.11.15 | `uv pip install -e .` — **succeeded**, exit 0 |
+| `h100` | `~/.local/bin/uv` (not on default non-interactive `PATH`) | 3.11.14 | `uv pip install -e .` — **succeeded**, exit 0 |
+| `paramrudra` (login node) | `/scratch/ldls-iiitd/.local/bin/uv`, already on `PATH` | 3.12.12 | `uv pip install -e .` — **succeeded**, exit 0 |
+
+All three built and installed the editable package cleanly (`Installed 2
+packages`: `mycelium==0.1.0`, `websockets==17.0.1`) with no PEP
+639/setuptools-version errors — build isolation resolved a
+`setuptools>=77`-satisfying version and built `license = "MIT"` /
+`license-files = ["LICENSE"]` without complaint on every node, including
+`paramrudra`'s login node, the one this issue's own wording specifically
+worried about ("CDAC HPC environment"). Verbose (`-v`) output was
+captured throughout; none of the three logs show any setuptools
+resolution failure or fallback.
+
+**Note on method:** the issue's original wording talks about bare `pip
+install -e .`. This verification used `uv pip install -e .` instead,
+because that's the actually-documented Phase 0 install path
+(`docs/SETUP.md`) — bare `pip`/`python3 -m venv` was already rejected
+there for unrelated reasons (missing `ensurepip` on at least one node).
+Testing the undocumented path would answer a question nobody will ever
+actually hit in practice. `paramrudra`'s ancient system `pip` (9.0.3,
+under system Python 3.6.8) was not tested directly — it already can't
+satisfy the project's `requires-python = ">=3.11"` floor regardless of
+license syntax, a pre-existing, unrelated constraint `docs/SETUP.md`
+already documents, not something this migration changes.
+
+**Scratch dirs (`~/mycelium-pep639-check` on each node, and the local
+staging directory) were removed after the check** — this was a
+disposable verification, not a permanent artifact.
+
+**Conclusion:** the gate issue #13 named is resolved — all three
+candidate nodes build the PEP 639 syntax successfully via the documented
+install path. The migration is approved to land as specified.
 
 ## Explicitly out of scope for this ticket
 
