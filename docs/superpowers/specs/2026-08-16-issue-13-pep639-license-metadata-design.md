@@ -101,10 +101,9 @@ already applied, `LICENSE`, `Readme.md`, and `src/mycelium/__init__.py`
 — enough for `[tool.setuptools.packages.find]`/`[tool.setuptools.dynamic]`
 to resolve, without the rest of the source tree) was copied to each of
 the three candidate nodes and installed with `uv venv` + `uv pip install
--e .` — the exact command sequence `docs/SETUP.md` already documents as
-the supported install path (not bare `pip`, and not `python3 -m venv`,
-which `docs/dependencies.md` separately notes lacks `ensurepip` on at
-least one candidate node).
+-e .` — the primary install path `docs/SETUP.md` documents. (`SETUP.md`
+also documents a plain-`pip` fallback for users without `uv`; see the
+"Bare `pip install -e .`" verification below for that path.)
 
 | Node | `uv` location | Python (via `uv venv`) | Result |
 |---|---|---|---|
