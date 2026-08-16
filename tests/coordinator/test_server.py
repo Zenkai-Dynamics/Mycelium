@@ -350,6 +350,36 @@ async def _run_fake_node(node_ws, reply_for) -> None:
         await node_ws.send(json.dumps(reply))
 
 
+class _FakeNodeWebsocket:
+    """Stand-in for a node's websocket, for testing
+    server._handle_complete_request's failover logic in isolation from a
+    real network connection — mirrors test_router.py's _FakeNodeWebsocket."""
+
+    def __init__(self, send_raises=None):
+        self.sent: list[str] = []
+        self._send_raises = send_raises
+
+    async def send(self, raw: str) -> None:
+        if self._send_raises is not None:
+            raise self._send_raises
+        self.sent.append(raw)
+
+
+class _FakeClientWebsocket:
+    """Collects what _handle_complete_request sends back to the client,
+    without a real network connection."""
+
+    def __init__(self):
+        self.sent: list[str] = []
+        self.closed = False
+
+    async def send(self, raw: str) -> None:
+        self.sent.append(raw)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 async def test_complete_request_routes_to_registered_node_and_returns_result(tmp_path):
     cert_path = tmp_path / "cert.pem"
     key_path = tmp_path / "key.pem"
@@ -692,3 +722,123 @@ async def test_concurrent_complete_requests_to_same_node_get_correct_replies(tmp
             await node_task
             assert response_a == {"type": "complete_result", "text": "reply to: A"}
             assert response_b == {"type": "complete_result", "text": "reply to: B"}
+
+
+async def test_complete_request_round_robins_across_two_healthy_nodes(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as node_a_ws:
+            await node_a_ws.send(json.dumps(
+                {"type": "register", "token": "secret-token", "model": "m", "node_id": "node-a"}
+            ))
+            await node_a_ws.recv()
+            node_a_task = asyncio.create_task(_run_fake_node(
+                node_a_ws, lambda msg: {"type": "complete_result", "text": f"node-a: {msg['prompt']}"}
+            ))
+
+            async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as node_b_ws:
+                await node_b_ws.send(json.dumps(
+                    {"type": "register", "token": "secret-token", "model": "m", "node_id": "node-b"}
+                ))
+                await node_b_ws.recv()
+                node_b_task = asyncio.create_task(_run_fake_node(
+                    node_b_ws, lambda msg: {"type": "complete_result", "text": f"node-b: {msg['prompt']}"}
+                ))
+
+                # Two separate connections, one per request: a client
+                # connection is one-shot (the server closes it after
+                # replying to a "complete" — see _handle_complete_request),
+                # so a second request on the same connection would find it
+                # already closed.
+                async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws_1:
+                    await client_ws_1.send(json.dumps(
+                        {"type": "complete", "token": "secret-token", "model": "m", "prompt": "1"}
+                    ))
+                    first = json.loads(await client_ws_1.recv())
+
+                async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws_2:
+                    await client_ws_2.send(json.dumps(
+                        {"type": "complete", "token": "secret-token", "model": "m", "prompt": "2"}
+                    ))
+                    second = json.loads(await client_ws_2.recv())
+
+                assert {first["text"], second["text"]} == {"node-a: 1", "node-b: 2"}
+
+            node_a_task.cancel()
+            node_b_task.cancel()
+
+
+async def test_complete_request_fails_over_to_healthy_node_when_first_pick_is_dead():
+    registry = NodeRegistry("secret-token")
+    dead_ws = _FakeNodeWebsocket(
+        send_raises=websockets.exceptions.ConnectionClosedError(None, None)
+    )
+    healthy_ws = _FakeNodeWebsocket()
+    registry.register("node-a", "m", dead_ws)  # registers first -> round robin picks it first
+    registry.register("node-b", "m", healthy_ws)
+
+    async def reply_from_node_b():
+        while not healthy_ws.sent:
+            await asyncio.sleep(0.01)
+        sent = json.loads(healthy_ws.sent[0])
+        node_b = registry.get("node-b")
+        node_b.pending[sent["request_id"]].set_result(
+            {"type": "complete_result", "text": "answer from node-b", "request_id": sent["request_id"]}
+        )
+
+    asyncio.create_task(reply_from_node_b())
+
+    client_ws = _FakeClientWebsocket()
+    await server._handle_complete_request(
+        client_ws, registry, {"token": "secret-token", "model": "m", "prompt": "hi"}
+    )
+
+    assert json.loads(client_ws.sent[0]) == {"type": "complete_result", "text": "answer from node-b"}
+    # node-a's dead connection must have been self-healed out of the registry.
+    assert registry.list_nodes() == [{"node_id": "node-b", "model": "m"}]
+
+
+async def test_complete_request_does_not_fail_over_on_timeout(monkeypatch):
+    monkeypatch.setattr(router, "NODE_COMPLETE_TIMEOUT_SECONDS", 0.2)
+    registry = NodeRegistry("secret-token")
+    slow_ws = _FakeNodeWebsocket()  # accepts the send, never replies
+    other_ws = _FakeNodeWebsocket()
+    registry.register("node-a", "m", slow_ws)
+    registry.register("node-b", "m", other_ws)
+
+    client_ws = _FakeClientWebsocket()
+    await server._handle_complete_request(
+        client_ws, registry, {"token": "secret-token", "model": "m", "prompt": "hi"}
+    )
+
+    response = json.loads(client_ws.sent[0])
+    assert response["type"] == "complete_error"
+    assert other_ws.sent == []  # node-b was never contacted
+    # A timeout isn't treated as a dead node — node-a stays registered.
+    assert registry.list_nodes() == [
+        {"node_id": "node-a", "model": "m"},
+        {"node_id": "node-b", "model": "m"},
+    ]
+
+
+async def test_complete_request_returns_error_when_every_node_is_dead():
+    registry = NodeRegistry("secret-token")
+    dead_a = _FakeNodeWebsocket(send_raises=websockets.exceptions.ConnectionClosedError(None, None))
+    dead_b = _FakeNodeWebsocket(send_raises=websockets.exceptions.ConnectionClosedError(None, None))
+    registry.register("node-a", "m", dead_a)
+    registry.register("node-b", "m", dead_b)
+
+    client_ws = _FakeClientWebsocket()
+    await server._handle_complete_request(
+        client_ws, registry, {"token": "secret-token", "model": "m", "prompt": "hi"}
+    )
+
+    response = json.loads(client_ws.sent[0])
+    assert response["type"] == "complete_error"
+    assert registry.list_nodes() == []
