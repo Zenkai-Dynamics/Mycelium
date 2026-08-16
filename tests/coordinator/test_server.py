@@ -424,6 +424,42 @@ async def test_complete_request_with_no_matching_node_returns_error(tmp_path):
             assert "no-such-model" in response["reason"]
 
 
+async def test_complete_request_with_no_healthy_node_fails_fast_with_no_retry(tmp_path, monkeypatch):
+    call_count = 0
+    original_find_node_for_model = NodeRegistry.find_node_for_model
+
+    def counting_find_node_for_model(self, *args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return original_find_node_for_model(self, *args, **kwargs)
+
+    monkeypatch.setattr(NodeRegistry, "find_node_for_model", counting_find_node_for_model)
+
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws:
+            await client_ws.send(json.dumps(
+                {"type": "complete", "token": "secret-token", "model": "no-such-model", "prompt": "hi"}
+            ))
+            start = time.monotonic()
+            response = json.loads(await client_ws.recv())
+            elapsed = time.monotonic() - start
+
+    assert response["type"] == "complete_error"
+    assert "no-such-model" in response["reason"]
+    assert elapsed < 1.0, (
+        f"response took {elapsed:.2f}s — a missing-node error must be immediate, not a hang or a wait"
+    )
+    assert call_count == 1, (
+        f"find_node_for_model was called {call_count} times — expected exactly 1 (no retry/poll loop)"
+    )
+
+
 async def test_complete_request_with_wrong_token_is_closed_without_reply(tmp_path):
     cert_path = tmp_path / "cert.pem"
     key_path = tmp_path / "key.pem"
