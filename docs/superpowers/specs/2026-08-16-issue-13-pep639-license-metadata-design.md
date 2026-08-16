@@ -122,21 +122,39 @@ worried about ("CDAC HPC environment"). Verbose (`-v`) output was
 captured throughout; none of the three logs show any setuptools
 resolution failure or fallback.
 
-**Note on method:** the issue's original wording talks about bare `pip
-install -e .`. This verification used `uv pip install -e .` instead,
-because that's the actually-documented Phase 0 install path
-(`docs/SETUP.md`) — bare `pip`/`python3 -m venv` was already rejected
-there for unrelated reasons (missing `ensurepip` on at least one node).
-Testing the undocumented path would answer a question nobody will ever
-actually hit in practice. `paramrudra`'s ancient system `pip` (9.0.3,
-under system Python 3.6.8) was not tested directly — it already can't
-satisfy the project's `requires-python = ">=3.11"` floor regardless of
-license syntax, a pre-existing, unrelated constraint `docs/SETUP.md`
-already documents, not something this migration changes.
+**Bare `pip install -e .` was also tested on `a6000` and `h100`**
+(2026-08-16, added after final review flagged the gap below), using a
+real `pip` binary — `uv venv --seed` to create the venv (working around
+the same missing-`ensurepip` issue `docs/dependencies.md` already
+documents for these nodes), then the venv's own `bin/pip install -e .`,
+not `uv pip`. Both succeeded, exit 0, and the verbose log shows build
+isolation resolving `setuptools>=77` for real: `a6000` — `Collecting
+setuptools>=77` → `Using cached setuptools-84.0.0-py3-none-any.whl`;
+`h100` — `Collecting setuptools>=77` → `Downloading
+setuptools-84.0.0-py3-none-any.whl` (a genuine, non-cached fetch,
+confirming build isolation actually reached
+`https://files.pythonhosted.org` over the network on that node, not
+just a local cache). Both installs finished `Successfully installed
+mycelium-0.1.0 websockets-17.0.1`.
 
-**Scratch dirs (`~/mycelium-pep639-check` on each node, and the local
-staging directory) were removed after the check** — this was a
-disposable verification, not a permanent artifact.
+**Note on method:** an earlier version of this doc claimed
+`docs/SETUP.md` "rejected" bare `pip`/`python3 -m venv` and that testing
+it would be pointless — that was wrong. `docs/SETUP.md` documents plain
+`pip` as a **supported fallback** for exactly this scenario ("No `uv`?
+Plain `pip` works too: `python3 -m venv .venv` /
+`.venv/bin/pip install -e .`"), and it's the literal path issue #13's
+own wording named. The bare-`pip` check above closes that gap on
+`a6000`/`h100`. `paramrudra`'s ancient system `pip` (9.0.3, under system
+Python 3.6.8) still was not tested directly — it already can't satisfy
+the project's `requires-python = ">=3.11"` floor regardless of license
+syntax, a pre-existing, unrelated constraint `docs/SETUP.md` already
+documents, not something this migration changes; the `uv`-provisioned
+venv (real Python 3.12.12) is what a `paramrudra` user must use either
+way, and that path is verified above.
+
+**Scratch dirs (`~/mycelium-pep639-check`, `~/mycelium-barepip-check` on
+each node, and the local staging directories) were removed after each
+check** — these were disposable verifications, not permanent artifacts.
 
 **Conclusion:** the gate issue #13 named is resolved — all three
 candidate nodes build the PEP 639 syntax successfully via the documented
