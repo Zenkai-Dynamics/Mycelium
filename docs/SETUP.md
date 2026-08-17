@@ -1,6 +1,6 @@
 # Mycelium — Developer Setup
 
-Related: [Phase 0 — Foundation](phases/phase-0-foundation.md) · [Dependency & hardware compatibility](dependencies.md)
+Related: [Phase 0 — Foundation](phases/phase-0-foundation.md) · [Dependency & hardware compatibility](dependencies.md) · [Operations guide](OPERATIONS.md)
 
 This walks through getting from a clean checkout to a working Mycelium
 development environment. It's split into two parts:
