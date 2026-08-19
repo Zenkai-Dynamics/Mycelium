@@ -46,6 +46,7 @@ Worth being aware of, not treated as a dependency: **Petals** (BigScience) has a
 ## 5. Documentation Map
 
 - `docs/SETUP.md` — developer setup guide: clean checkout to a working dev environment, covering the platform-agnostic base install and the Linux/GPU node extra.
+- `docs/OPERATIONS.md` — operations guide: running the system for real — generating a token, starting a coordinator, connecting a node, sending a client request.
 - `docs/phases/` — one doc per phase (linked above), the living source of truth for that phase's scope, architecture, and open questions. Update these in place as each phase is actually built, rather than treating this Readme as the record.
 - `docs/adr/` — architecture decision records (e.g. the project name).
 - `docs/superpowers/specs/` — dated design-session records, capturing *why* a decision was made at the time, left as-written rather than updated.
