@@ -8,8 +8,8 @@ dynamic = ["version"]
 description = "A framework for running LLM inference across GPUs volunteered by geographically separated users."
 readme = "Readme.md"
 requires-python = ">=3.11"
-license = "MIT"
-license-files = ["LICENSE"]
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [{name = "Varun Gambhir"}]
 dependencies = [
     "websockets==17.0.1",
