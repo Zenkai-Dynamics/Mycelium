@@ -12,6 +12,7 @@ from threading import Thread
 
 import websockets
 
+from mycelium import crypto
 from mycelium.client.cli import complete as client_complete
 from mycelium.coordinator import certs, server
 from mycelium.node import connection, registration, request_handler
@@ -30,13 +31,20 @@ async def test_node_connects_survives_a_ping_cycle_and_reconnects_after_drop(tmp
     connect_count = 0
     stop = asyncio.Event()
 
+    private_key = crypto.generate_keypair()
+    public_key = crypto.public_key_b64(private_key)
+    signature = crypto.sign_public_key(private_key)
+
     async def node_loop(port):
         nonlocal connect_count
         async for websocket in connection.connect(
             f"wss://127.0.0.1:{port}", cert_path, reconnect_delays_factory=fast_delays
         ):
             connect_count += 1
-            await registration.register(websocket, token="secret-token", model="m", node_id="node-a")
+            await registration.register(
+                websocket, token="secret-token", model="m", node_id="node-a",
+                public_key=public_key, signature=signature,
+            )
             try:
                 await websocket.wait_closed()
             except websockets.exceptions.ConnectionClosed:
@@ -125,13 +133,18 @@ async def test_full_round_trip_client_through_coordinator_to_node_and_back(tmp_p
         key_path = tmp_path / "key.pem"
         certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
+        private_key = crypto.generate_keypair()
+        public_key = crypto.public_key_b64(private_key)
+        signature = crypto.sign_public_key(private_key)
+
         async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
             port = coordinator.sockets[0].getsockname()[1]
 
             async def node_loop():
                 async for websocket in connection.connect(f"wss://127.0.0.1:{port}", cert_path):
                     await registration.register(
-                        websocket, token="secret-token", model="m", node_id="node-a"
+                        websocket, token="secret-token", model="m", node_id="node-a",
+                        public_key=public_key, signature=signature,
                     )
                     await request_handler.handle_messages(websocket, process)
 

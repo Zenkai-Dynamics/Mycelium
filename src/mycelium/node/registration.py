@@ -40,14 +40,24 @@ async def register(
     token: str,
     model: str,
     node_id: str,
+    public_key: str,
+    signature: str,
     timeout: float = REGISTRATION_TIMEOUT_SECONDS,
 ) -> None:
     """Send the registration message and wait for the coordinator's
     response. Returns normally on success. Raises RegistrationRejected if
-    the coordinator rejects the token (or closes the connection before
-    responding), or RegistrationTimeout if no response arrives in time."""
+    the coordinator rejects the token or signature (or closes the
+    connection before responding), or RegistrationTimeout if no response
+    arrives in time."""
     await websocket.send(
-        json.dumps({"type": "register", "token": token, "model": model, "node_id": node_id})
+        json.dumps({
+            "type": "register",
+            "token": token,
+            "model": model,
+            "node_id": node_id,
+            "public_key": public_key,
+            "signature": signature,
+        })
     )
     try:
         # asyncio.timeout(), not asyncio.wait_for(): wait_for has a known
