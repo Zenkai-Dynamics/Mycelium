@@ -29,11 +29,11 @@ Each phase links to its own document — the full architecture and open question
 | Phase | Scope | Status | Doc |
 |---|---|---|---|
 | **0** | One LLM. A small, closed pool of nodes the operator personally controls (HPC allocations, VPN-gated lab machines). Prove client → coordinator → node → response round-trips end to end. | **Building now** | [phase-0-foundation.md](docs/phases/phase-0-foundation.md) |
-| **1** | Open the pool to public, opt-in volunteer nodes — torrent/BOINC-style. Still one LLM per request; trust and abuse-prevention become real concerns. | Future, not yet designed | [phase-1-open-network.md](docs/phases/phase-1-open-network.md) |
+| **1** | Open the pool to public, opt-in volunteer nodes — torrent/BOINC-style. Still one LLM per request; trust and abuse-prevention become real concerns. | Designed, not yet built ([PRD: issue #31](https://github.com/Zenkai-Dynamics/Mycelium/issues/31)) | [phase-1-open-network.md](docs/phases/phase-1-open-network.md) |
 | **2** | Multiple different LLMs hosted across different nodes, composed by an agent's multi-LLM flow. Context/prompt state gets passed between hosts as the agent moves between models. | Future, not yet designed | [phase-2-multi-llm-agentic.md](docs/phases/phase-2-multi-llm-agentic.md) |
 | **3** | Split a single LLM's *layers* across multiple GPU farms (pipeline/model parallelism) for models too large for any one farm to hold; activations pass host to host mid-inference. | Far future, not yet designed | [phase-3-model-parallelism.md](docs/phases/phase-3-model-parallelism.md) |
 
-Only Phase 0 has actually been designed in any depth so far. Phases 1–3 docs record what was decided about *scope* during the initial brainstorm, plus the open questions that still need their own brainstorming pass when each phase's turn comes — they are deliberately not filled in with invented detail.
+Phase 0 and Phase 1 have now been designed in depth; Phases 2–3 docs still only record what was decided about *scope* during the initial brainstorm, plus the open questions that need their own brainstorming pass when each phase's turn comes — they are deliberately not filled in with invented detail.
 
 Non-goals for *every* phase covered by this document: payments/incentive mechanisms, model training or fine-tuning, multi-tenant SLAs. These may become relevant far downstream but are not shaping any decision made here.
 
@@ -41,7 +41,7 @@ Non-goals for *every* phase covered by this document: payments/incentive mechani
 
 ## 4. Prior Art
 
-Worth being aware of, not treated as a dependency: **Petals** (BigScience) has already built public, volunteer-run layer-split inference for large models — directly relevant to Phase 3. **Hivemind**, also BigScience, is a DHT-based library for decentralized coordination among untrusted peers — relevant to Phase 1's move away from a single coordinator. Neither is assumed as a dependency here; noted so Phase 1/3 design doesn't reinvent solved problems unknowingly.
+Worth being aware of, not treated as a dependency: **Petals** (BigScience) has already built public, volunteer-run layer-split inference for large models — directly relevant to Phase 3. **Hivemind**, also BigScience, is a DHT-based library for decentralized coordination among untrusted peers — considered for Phase 1's discovery mechanism and explicitly deferred (Phase 1 keeps a centralized coordinator; decentralized discovery is now pushed to Phase 2/3 territory or a later revisit — see [phase-1-open-network.md](docs/phases/phase-1-open-network.md)). Neither is assumed as a dependency here; noted so later design doesn't reinvent solved problems unknowingly.
 
 ## 5. Documentation Map
 
