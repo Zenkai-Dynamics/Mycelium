@@ -71,7 +71,7 @@ def main() -> None:
         print("No nodes registered.")
         return
     for node in nodes:
-        print(f"{node['node_id']}: {node['model']}")
+        print(f"{node['node_id']} [{node['fingerprint']}]: {node['model']}")
 
 
 if __name__ == "__main__":
