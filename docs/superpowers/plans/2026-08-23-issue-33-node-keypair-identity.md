@@ -1069,9 +1069,22 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 
 ## Task 5: Node registration message carries `public_key`/`signature`
 
+**Note added during Task 4's fix-loop:** `tests/test_integration.py` has two
+direct calls to `registration.register(websocket, token=..., model=...,
+node_id=...)` (old positional style) that this task's signature change
+will break with a `TypeError` (missing required `public_key`/`signature`)
+unless also fixed here — this file was missed when the plan was
+originally written (Task 4 found and fixed two *other* similarly-missed
+files — `tests/coordinator/test_router.py` and `tests/client/test_cli.py`
+— that were fixable without this task's registration.py change; this one
+genuinely couldn't be fixed until this task lands, since it calls
+`registration.register()` directly, whose signature only gains
+`public_key`/`signature` in this task).
+
 **Files:**
 - Modify: `src/mycelium/node/registration.py` (`register` function)
 - Modify: `tests/node/test_registration.py` (every call site)
+- Modify: `tests/test_integration.py` (two `registration.register(...)` call sites)
 
 **Interfaces:**
 - Produces: `register(websocket, token: str, model: str, node_id: str, public_key: str, signature: str, timeout: float = REGISTRATION_TIMEOUT_SECONDS) -> None` — raises `RegistrationRejected`/`RegistrationTimeout` exactly as before.
@@ -1175,10 +1188,64 @@ async def register(
 Run: `.venv/bin/pytest tests/node/test_registration.py -v`
 Expected: PASS (8 tests)
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Fix `tests/test_integration.py`'s two direct `registration.register()` calls**
+
+Add `from mycelium import crypto` to this file's imports. In
+`test_node_connects_survives_a_ping_cycle_and_reconnects_after_drop`,
+change:
+
+```python
+            await registration.register(websocket, token="secret-token", model="m", node_id="node-a")
+```
+
+to (generate once outside `node_loop`, near its other setup, so the same
+identity is reused across this test's two reconnects — matching a real
+node's persisted-keypair behavior):
+
+```python
+    private_key = crypto.generate_keypair()
+    public_key = crypto.public_key_b64(private_key)
+    signature = crypto.sign_public_key(private_key)
+```
+
+(add these three lines before `async def node_loop(port):`'s definition, then inside `node_loop`, change the call to:)
+
+```python
+            await registration.register(
+                websocket, token="secret-token", model="m", node_id="node-a",
+                public_key=public_key, signature=signature,
+            )
+```
+
+In `test_full_round_trip_client_through_coordinator_to_node_and_back`, apply the same pattern: generate the keypair once before `async def node_loop():`'s definition, then change:
+
+```python
+                    await registration.register(
+                        websocket, token="secret-token", model="m", node_id="node-a"
+                    )
+```
+
+to:
+
+```python
+                    await registration.register(
+                        websocket, token="secret-token", model="m", node_id="node-a",
+                        public_key=public_key, signature=signature,
+                    )
+```
+
+Run: `.venv/bin/pytest tests/test_integration.py -v`
+Expected: PASS (4 tests)
+
+- [ ] **Step 6: Run the full suite**
+
+Run: `.venv/bin/pytest -q`
+Expected: PASS, zero failures (this closes out every failure Task 4 left open).
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/mycelium/node/registration.py tests/node/test_registration.py
+git add src/mycelium/node/registration.py tests/node/test_registration.py tests/test_integration.py
 git commit -m "feat: node registration message carries public_key/signature (issue #33)
 
 Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
