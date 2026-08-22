@@ -7,6 +7,7 @@ import ssl
 import pytest
 import websockets
 
+from mycelium import crypto
 from mycelium.coordinator import certs, server
 from mycelium.client.cli import CompletionError, complete, parse_args
 
@@ -55,9 +56,12 @@ async def test_complete_returns_text_on_success(tmp_path):
         port = coordinator.sockets[0].getsockname()[1]
         client_ctx = _client_ssl_context(cert_path)
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as node_ws:
-            await node_ws.send(json.dumps(
-                {"type": "register", "token": "secret-token", "model": "m", "node_id": "node-a"}
-            ))
+            private_key = crypto.generate_keypair()
+            await node_ws.send(json.dumps({
+                "type": "register", "token": "secret-token", "model": "m", "node_id": "node-a",
+                "public_key": crypto.public_key_b64(private_key),
+                "signature": crypto.sign_public_key(private_key),
+            }))
             await node_ws.recv()
 
             async def fake_node():
