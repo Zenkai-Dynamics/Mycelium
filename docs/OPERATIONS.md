@@ -150,8 +150,26 @@ more memorable name. Registering a second time under the same node ID
 (e.g. after a restart) silently replaces the previous connection under
 that ID rather than erroring.
 
+**Running more than one node on the same physical machine** (one GPU
+each): give each a distinct `--vllm-port` too, not just a distinct
+`--node-id`/`--gpu`. `--vllm-port` defaults to 8811 for every node — two
+co-located nodes sharing it means the second node's own `vllm serve`
+fails to bind (`Address already in use`), but its readiness check polls
+the fixed `127.0.0.1:<port>/health` rather than confirming the response
+came from its own process, so it sees the *first* node's healthy
+response, prints `vLLM ready`, and registers anyway — silently pointing
+at the wrong node's engine. Confirmed live; not caught or warned about
+anywhere today.
+
 `SIGTERM`/`SIGHUP`/`Ctrl-C` all stop `vllm serve` cleanly (process-group
 kill, no orphaned GPU processes) before the node agent exits.
+**`kill -9` does not** — a killed process can't run its own cleanup
+code, so `vllm serve` (and its `EngineCore` subprocess) is orphaned,
+still holding the GPU. Confirmed live, twice. If you have to hard-kill a
+node, check `nvidia-smi` afterward and clean up manually:
+`ps -o pid,ppid,pgid -p <vllm-serve-pid>` to confirm it's its own
+process-group leader, then `kill -9 -<that-pgid>` (the leading `-`
+targets the whole group).
 
 ## Step 4 — Check what's registered
 
@@ -221,7 +239,13 @@ they'd otherwise share a hostname), all pointed at the same coordinator.
 The coordinator round-robins across every node registered for a given
 model. Killing whichever node a request lands on triggers an automatic,
 immediate failover to another healthy node hosting the same model — no
-client-visible failure as long as one remains.
+client-visible failure as long as one remains. Live-verified end to end
+(two real nodes, a real coordinator on a separate host, a real client on
+a fourth machine) — see issue #11's design doc for the full transcript.
+
+Running more than one node on the *same* physical machine (one GPU
+each)? See the `--vllm-port` caveat in Step 3 above — it's a real
+footgun that silently cross-talks between co-located nodes if skipped.
 
 ## The trust model in one paragraph
 

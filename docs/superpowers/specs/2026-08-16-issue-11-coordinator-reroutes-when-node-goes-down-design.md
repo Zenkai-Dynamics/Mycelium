@@ -155,3 +155,148 @@ protocol (#8/#9/#10, unchanged). Queueing. Any concurrency cap or admission
 control (#10, unchanged). True multi-machine live verification pending
 `h100`'s permission fix — noted as a real gap, not the blocking concern of
 this issue.
+
+## Live verification (2026-08-19, issue #25)
+
+Task 4's deferred live-hardware verification, run for real once `a6000`
+had all four GPUs simultaneously idle. Went one step further than the
+plan's own bar: rather than running the coordinator on `a6000` itself via
+loopback (matching #10's pattern), the coordinator ran on a genuinely
+separate host — a third-party VPS (`azureuser@20.244.2.48`) — and the
+client ran from a fourth, separate machine (the operator's own dev
+machine). So this is real three-role separation over a real network
+(client → coordinator → node, three different machines), not just the
+two real GPUs the acceptance criteria literally asked for. `h100`'s
+permission issue (noted above) still blocks true *two-separate-GPU-host*
+verification — that remains a real, separate gap.
+
+**Setup.** A fresh token and self-signed cert were generated on the VPS;
+`mycelium-coordinator --cert-san-ip 20.244.2.48` started there, listening
+`0.0.0.0:8765`. Reachability from `a6000` to the VPS's port 8765 was
+confirmed directly (`bash -c 'echo > /dev/tcp/20.244.2.48/8765'`) before
+starting any node. Two node agents were started on `a6000`, both pointed
+at `wss://20.244.2.48:8765`:
+
+```
+$ mycelium-node --coordinator-url wss://20.244.2.48:8765 \
+    --coordinator-cert vps-coord-cert.pem --token-file vps-token.txt \
+    --node-id a6000-node-a --gpu 0 --vllm-port 8811
+vLLM ready
+mycelium-node 0.1.0 connecting to wss://20.244.2.48:8765
+connected to coordinator (wss://20.244.2.48:8765)
+registered with coordinator as 'a6000-node-a'
+
+$ mycelium-node --coordinator-url wss://20.244.2.48:8765 \
+    --coordinator-cert vps-coord-cert.pem --token-file vps-token.txt \
+    --node-id a6000-node-b --gpu 1 --vllm-port 8812
+vLLM ready
+mycelium-node 0.1.0 connecting to wss://20.244.2.48:8765
+connected to coordinator (wss://20.244.2.48:8765)
+registered with coordinator as 'a6000-node-b'
+```
+
+`mycelium-coordinator-status` (run from the VPS) confirmed both:
+`a6000-node-a: Qwen/Qwen2.5-7B-Instruct` and
+`a6000-node-b: Qwen/Qwen2.5-7B-Instruct`.
+
+**Real finding, fixed before this counted as a valid run:** the first
+attempt used the default `--vllm-port` (8811) for both nodes. Since both
+run on the same physical host, node-b's own `vllm serve` failed to bind
+(`OSError: [Errno 98] Address already in use`) — but node-b's readiness
+check polls a fixed `127.0.0.1:<port>/health` rather than verifying the
+health response came from *its own* subprocess, so it got a 200 from
+node-a's already-listening server instead, printed `vLLM ready`, and
+registered anyway — while its own `vllm serve` had actually crashed.
+Fixed by giving each co-located node a distinct `--vllm-port`
+(8811/8812) and restarting node-b cleanly. Worth calling out for anyone
+running multiple nodes on one physical host: distinct `--vllm-port` per
+node is required, and isn't enforced or warned about anywhere today.
+
+**Scenario A** (the literal acceptance criterion). First request, run
+from the client machine:
+
+```
+$ mycelium-client --coordinator-url wss://20.244.2.48:8765 \
+    --coordinator-cert vps-coord-cert.pem --token-file vps-token.txt \
+    --model Qwen/Qwen2.5-7B-Instruct \
+    --prompt "What is the capital of France? Answer in one short sentence."
+The capital of France is Paris.
+```
+
+node-a's log showed the `POST /v1/chat/completions` (it registered
+first, so round-robin picked it first). `kill -9` on node-a's
+`mycelium-node` PID; `nvidia-smi` confirmed GPU 0's memory freed
+immediately. Second request, run right after:
+
+```
+$ mycelium-client --coordinator-url wss://20.244.2.48:8765 \
+    --coordinator-cert vps-coord-cert.pem --token-file vps-token.txt \
+    --model Qwen/Qwen2.5-7B-Instruct \
+    --prompt "What is the capital of Japan? Answer in one short sentence."
+The capital of Japan is Tokyo.
+```
+
+Correct completion, no error surfaced to the client. node-b's log showed
+the `POST`; `mycelium-coordinator-status` immediately after showed only
+`a6000-node-b` — node-a was gone from the registry. **Closes success
+criterion #3** ("killing a node removes it from routing — no request
+gets sent to a dead node") together with Scenario B below.
+
+**Real finding, not a defect in this issue's scope:** `kill -9` on the
+node agent's process bypasses its `SIGTERM`/`SIGHUP`/`SIGINT` handler
+entirely — including the process-group `vllm serve` cleanup that handler
+runs — since a killed process can't execute any of its own code. Both
+times a node was `kill -9`'d during this verification, its `vllm serve`
+process tree (`APIServer` + `VLLM::EngineCore` + a resource-tracker
+process) was left running as an orphan, still holding the GPU, until
+manually killed (`kill -9 -<pgid>`, the negative-PID process-group form —
+confirmed via `ps -o pid,ppid,pgid` that `vllm serve` runs as its own
+group leader). This is expected OS behavior given `kill -9` cannot be
+caught, not a bug in `VLLMProcess.stop()` (which *does* correctly clean
+up on a graceful signal — already established by #7's own live
+verification). Worth a `docs/OPERATIONS.md` troubleshooting note for any
+operator who hard-kills a node agent: check `nvidia-smi` afterward, since
+a `kill -9` (as opposed to `kill`/`SIGTERM`) may leave the GPU occupied.
+
+**Scenario B** (forced failover — the coordinator's first pick is
+already dead). node-a restarted, both nodes confirmed healthy again via
+`mycelium-coordinator-status` (returned `a6000-node-b` then
+`a6000-node-a`, in that order — consistent with round-robin state left
+over from Scenario A, where node-b served the request most recently, so
+node-a was next in rotation). node-a `kill -9`'d again, *before* sending
+any request; `nvidia-smi` confirmed the same orphan pattern as Scenario A
+(cleaned up the same way afterward). Request sent immediately:
+
+```
+$ mycelium-client --coordinator-url wss://20.244.2.48:8765 \
+    --coordinator-cert vps-coord-cert.pem --token-file vps-token.txt \
+    --model Qwen/Qwen2.5-7B-Instruct \
+    --prompt "Say the word banana and nothing else."
+banana
+# real 0m0.946s
+```
+
+Correct completion, no client-visible failure, and — critically —
+**under one second total**, which is only possible if the coordinator's
+first pick (node-a, already dead) was caught and retried immediately via
+the disconnect-catch/self-heal path, not the ~130s node-timeout path.
+node-b's log showed the `POST`; `mycelium-coordinator-status` immediately
+after showed only `a6000-node-b` again, confirming the dead node was
+self-healed out of the registry synchronously, not left registered until
+a #9 ping/pong timeout (~50s worst case) caught up to it. **This is the
+scenario that specifically exercises `NodeDisconnectedError` catch +
+retry**, as opposed to Scenario A which round-robin alone could have
+satisfied by luck.
+
+**Cleanup.** Both node processes and the coordinator stopped; all
+scratch token/cert/log files removed from the VPS and `a6000`;
+`nvidia-smi` confirmed all four GPUs back to idle (4 MiB) before ending
+the session.
+
+**Conclusion:** #11's round-robin and disconnect-catch/self-heal failover
+both hold on real hardware, across a real network topology with genuine
+client/coordinator/node machine separation. Success criterion #3 is now
+verified both at the code/test level (already true before this issue)
+and live. Closes #25; the two real findings above (co-located nodes need
+distinct `--vllm-port`; `kill -9` orphans the GPU process) are
+independently useful and worth folding into `docs/OPERATIONS.md`.
