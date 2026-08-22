@@ -222,6 +222,11 @@ async def _handle_registration(websocket, registry: NodeRegistry, message: dict)
         await websocket.close()
         return
 
+    # Collapse non-canonical base64 spellings of the same raw key to one
+    # string, so the registry's string-keyed dict can't be handed the same
+    # key twice under different spellings — see crypto.canonical_public_key.
+    public_key = crypto.canonical_public_key(public_key)
+
     superseded = registry.register(public_key, node_id, model, websocket)
     # Captured once, right now — never re-fetched from the registry later.
     # If this node reconnects again before this connection's cleanup runs,

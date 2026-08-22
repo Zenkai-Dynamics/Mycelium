@@ -10,7 +10,6 @@ how it's encoded on the wire. See the design doc for issue #33.
 from __future__ import annotations
 
 import base64
-import binascii
 import hashlib
 
 from cryptography.exceptions import InvalidSignature
@@ -64,9 +63,22 @@ def verify_registration_signature(public_key_b64_str, signature_b64_str) -> bool
         raw_signature = base64.b64decode(signature_b64_str, validate=True)
         public_key = ed25519.Ed25519PublicKey.from_public_bytes(raw_public_key)
         public_key.verify(raw_signature, raw_public_key)
-    except (binascii.Error, ValueError, InvalidSignature):
+    except (ValueError, InvalidSignature):
         return False
     return True
+
+
+def canonical_public_key(public_key_b64_str: str) -> str:
+    """Re-encode a base64 public key string to its canonical form —
+    collapses the small number of non-canonical base64 encodings that
+    decode to the same 32 raw bytes (unused trailing bits in the final
+    character aren't checked by base64 decoding) to one string, so
+    NodeRegistry's string-keyed dict can't be handed the same key twice
+    under different spellings. Only ever called after
+    verify_registration_signature has already confirmed public_key_b64_str
+    decodes to a valid 32-byte value — this function assumes that."""
+    raw_public_key = base64.b64decode(public_key_b64_str)
+    return base64.b64encode(raw_public_key).decode("ascii")
 
 
 def fingerprint(public_key_b64_str: str) -> str:

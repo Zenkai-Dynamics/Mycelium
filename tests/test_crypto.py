@@ -1,11 +1,29 @@
 """Tests for mycelium.crypto."""
 
 import base64
+import string
 
-import pytest
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from mycelium import crypto
+
+_B64_ALPHABET = string.ascii_uppercase + string.ascii_lowercase + string.digits + "+/"
+
+
+def _non_canonical_variant(public_key_b64_str: str) -> str:
+    """Brute-force an alternate base64 spelling of the same raw bytes as
+    public_key_b64_str. For a 32-byte payload, the second-to-last base64
+    character carries 2 unused low bits that plain base64 decoding doesn't
+    check — trying every alphabet character in that slot finds the (up to
+    3) other spellings that decode to the identical bytes."""
+    raw = base64.b64decode(public_key_b64_str)
+    for candidate_char in _B64_ALPHABET:
+        candidate = public_key_b64_str[:-2] + candidate_char + public_key_b64_str[-1]
+        if candidate == public_key_b64_str:
+            continue
+        if base64.b64decode(candidate, validate=True) == raw:
+            return candidate
+    raise AssertionError(f"no non-canonical variant found for {public_key_b64_str!r}")
 
 
 def test_generate_keypair_returns_ed25519_private_key():
@@ -73,3 +91,32 @@ def test_fingerprint_differs_for_different_keys():
     key_a = crypto.generate_keypair()
     key_b = crypto.generate_keypair()
     assert crypto.fingerprint(crypto.public_key_b64(key_a)) != crypto.fingerprint(crypto.public_key_b64(key_b))
+
+
+def test_non_canonical_spelling_still_passes_signature_verification():
+    """Establishes the vulnerability precondition: a non-canonical base64
+    spelling of the same raw public key bytes still verifies successfully,
+    since verify_registration_signature operates on decoded bytes, not the
+    base64 string itself."""
+    key = crypto.generate_keypair()
+    canonical = crypto.public_key_b64(key)
+    signature = crypto.sign_public_key(key)
+    non_canonical = _non_canonical_variant(canonical)
+
+    assert non_canonical != canonical
+    assert base64.b64decode(non_canonical) == base64.b64decode(canonical)
+    assert crypto.verify_registration_signature(non_canonical, signature) is True
+
+
+def test_canonical_public_key_collapses_non_canonical_spelling_to_same_string():
+    key = crypto.generate_keypair()
+    canonical = crypto.public_key_b64(key)
+    non_canonical = _non_canonical_variant(canonical)
+
+    assert crypto.canonical_public_key(canonical) == crypto.canonical_public_key(non_canonical)
+
+
+def test_canonical_public_key_of_an_already_canonical_string_is_unchanged():
+    key = crypto.generate_keypair()
+    canonical = crypto.public_key_b64(key)
+    assert crypto.canonical_public_key(canonical) == canonical

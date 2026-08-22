@@ -5,6 +5,7 @@ import base64
 import hashlib
 import json
 import ssl
+import string
 import time
 
 import pytest
@@ -16,6 +17,23 @@ from mycelium.coordinator.registry import NodeRegistry
 
 PUBKEY_A = base64.b64encode(b"a" * 32).decode()
 PUBKEY_B = base64.b64encode(b"b" * 32).decode()
+
+_B64_ALPHABET = string.ascii_uppercase + string.ascii_lowercase + string.digits + "+/"
+
+
+def _non_canonical_variant(public_key_b64_str: str) -> str:
+    """Brute-force an alternate base64 spelling of the same raw bytes as
+    public_key_b64_str — see the matching helper in tests/test_crypto.py
+    for why this is possible (2 unused low bits in the second-to-last
+    base64 character of a 32-byte payload)."""
+    raw = base64.b64decode(public_key_b64_str)
+    for candidate_char in _B64_ALPHABET:
+        candidate = public_key_b64_str[:-2] + candidate_char + public_key_b64_str[-1]
+        if candidate == public_key_b64_str:
+            continue
+        if base64.b64decode(candidate, validate=True) == raw:
+            return candidate
+    raise AssertionError(f"no non-canonical variant found for {public_key_b64_str!r}")
 
 
 def _client_ssl_context(cert_path):
@@ -236,6 +254,52 @@ async def test_duplicate_public_key_replaces_and_closes_old_connection(tmp_path)
                 assert response["nodes"] == [
                     {"node_id": "node-a", "model": "model-b", "fingerprint": crypto.fingerprint(public_key)}
                 ]
+
+
+async def test_reregistration_with_non_canonical_public_key_spelling_is_treated_as_same_node(tmp_path):
+    """A non-canonical base64 spelling of the SAME raw public key (its real
+    signature verifies regardless of which spelling wraps it — the
+    signature is over the raw bytes) must not let one keypair occupy two
+    registry entries. See Finding 1 of the final whole-branch review for
+    issue #33."""
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+
+        private_key = crypto.generate_keypair()
+        canonical_public_key = crypto.public_key_b64(private_key)
+        signature = crypto.sign_public_key(private_key)
+        non_canonical_public_key = _non_canonical_variant(canonical_public_key)
+        assert non_canonical_public_key != canonical_public_key
+
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws_first:
+            await ws_first.send(json.dumps({
+                "type": "register", "token": "secret-token", "model": "model-a",
+                "node_id": "node-a", "public_key": canonical_public_key, "signature": signature,
+            }))
+            await ws_first.recv()
+
+            async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws_second:
+                await ws_second.send(json.dumps({
+                    "type": "register", "token": "secret-token", "model": "model-b",
+                    "node_id": "node-a", "public_key": non_canonical_public_key, "signature": signature,
+                }))
+                await ws_second.recv()
+
+                async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as status_ws:
+                    await status_ws.send(json.dumps({"type": "status_query", "token": "secret-token"}))
+                    response = json.loads(await status_ws.recv())
+                    assert response["nodes"] == [
+                        {
+                            "node_id": "node-a",
+                            "model": "model-b",
+                            "fingerprint": crypto.fingerprint(canonical_public_key),
+                        }
+                    ]
 
 
 async def test_different_public_keys_with_same_node_id_both_remain_registered(tmp_path):

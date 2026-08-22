@@ -16,7 +16,8 @@ FINGERPRINT_LENGTH = 12
 
 
 def _expected_fingerprint(raw: bytes) -> str:
-    """Independently compute expected fingerprint (base64-decode → SHA256 → truncate).
+    """Independently compute expected fingerprint (SHA256 → truncate) from
+    already-raw bytes; callers base64-decode first (e.g. `_expected_fingerprint(b"a" * 32)`).
     Never calls crypto.fingerprint() — this tests the formula itself."""
     return hashlib.sha256(raw).hexdigest()[:FINGERPRINT_LENGTH]
 
