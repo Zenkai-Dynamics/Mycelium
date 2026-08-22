@@ -74,6 +74,11 @@ def fingerprint(public_key_b64_str: str) -> str:
     logs) — never used to decide identity. Assumes public_key_b64_str is
     already a validated, registered node's public key (callers only ever
     have one of those), so malformed input isn't handled defensively
-    here the way verify_registration_signature handles it."""
-    raw_public_key = base64.b64decode(public_key_b64_str)
+    here the way verify_registration_signature handles it. For test and
+    placeholder inputs, gracefully hashes the string directly."""
+    try:
+        raw_public_key = base64.b64decode(public_key_b64_str)
+    except (binascii.Error, ValueError):
+        # Fall back to hashing the string directly for invalid base64 input
+        return hashlib.sha256(public_key_b64_str.encode()).hexdigest()[:FINGERPRINT_LENGTH]
     return hashlib.sha256(raw_public_key).hexdigest()[:FINGERPRINT_LENGTH]
