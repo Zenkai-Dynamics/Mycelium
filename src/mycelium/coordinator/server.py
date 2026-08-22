@@ -21,6 +21,7 @@ from pathlib import Path
 
 import websockets
 
+from mycelium import crypto
 from mycelium.coordinator import router
 from mycelium.coordinator.registry import Node, NodeRegistry
 
@@ -139,8 +140,8 @@ async def _handle_complete_request(websocket, registry: NodeRegistry, message: d
             # The picked node is actually dead — self-heal the registry
             # right away (don't wait for #9's ping/pong timeout) and try a
             # different healthy node instead of failing the request.
-            registry.unregister(node.node_id, node.websocket)
-            tried.add(node.node_id)
+            registry.unregister(node.public_key, node.websocket)
+            tried.add(node.public_key)
             continue
         except router.RoutingError as exc:
             try:
@@ -205,12 +206,29 @@ async def _handle_registration(websocket, registry: NodeRegistry, message: dict)
         await websocket.close()
         return
 
-    superseded = registry.register(node_id, model, websocket)
+    public_key = message.get("public_key")
+    signature = message.get("signature")
+    if not public_key or not signature:
+        await websocket.send(json.dumps(
+            {"type": "registration_rejected", "reason": "public_key and signature are required"}
+        ))
+        await websocket.close()
+        return
+
+    if not crypto.verify_registration_signature(public_key, signature):
+        await websocket.send(json.dumps(
+            {"type": "registration_rejected", "reason": "invalid signature"}
+        ))
+        await websocket.close()
+        return
+
+    superseded = registry.register(public_key, node_id, model, websocket)
     # Captured once, right now — never re-fetched from the registry later.
     # If this node reconnects again before this connection's cleanup runs,
-    # a fresh registry.get(node_id) at that point would return the *newer*
-    # connection's Node, not this one. See the design doc for issue #10.
-    node = registry.get(node_id)
+    # a fresh registry.get(public_key) at that point would return the
+    # *newer* connection's Node, not this one. See the design doc for
+    # issue #10.
+    node = registry.get(public_key)
     # Ack the new connection FIRST — closing a superseded connection can
     # block for its full close_timeout if that connection is a half-dead
     # zombie (the common case: a node reconnecting after a network blip,
@@ -226,7 +244,7 @@ async def _handle_registration(websocket, registry: NodeRegistry, message: dict)
     except websockets.exceptions.ConnectionClosed:
         pass
     finally:
-        registry.unregister(node_id, websocket)
+        registry.unregister(public_key, websocket)
         # Anything still waiting on this connection (issue #10) needs to
         # fail now, not sit out the full route_request timeout for a node
         # that's already visibly gone — whether cleanly closed, silently
