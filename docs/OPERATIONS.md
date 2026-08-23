@@ -33,11 +33,13 @@ Client  →  Coordinator  →  Node agent  →  vLLM  →  response
 - **Client** — a one-shot request: connect, send one prompt, get one
   completion back, exit.
 
-Every connection is TLS, authenticated by one shared secret token (same
-token used by every node and every client) plus a self-signed
-certificate the coordinator generates once and that every node/client
-must have a local copy of. There's no CA — a copy of the coordinator's
-own cert file *is* the trust anchor (see
+Every connection is TLS; client connections (and the coordinator's own
+bootstrap) are additionally authenticated by one shared secret token, while
+a node's identity is its own self-generated keypair plus a one-time GitHub
+sign-in (see Step 1 and Step 3). All connections additionally use a
+self-signed certificate the coordinator generates once, which every
+node/client must have a local copy of. There's no CA — a copy of the
+coordinator's own cert file *is* the trust anchor (see
 ["The trust model in one paragraph"](#the-trust-model-in-one-paragraph)
 below).
 
