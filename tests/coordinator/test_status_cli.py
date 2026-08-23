@@ -7,6 +7,7 @@ import websockets
 
 from mycelium import crypto
 from mycelium.coordinator import certs, server
+from mycelium.coordinator import github_identity
 from mycelium.coordinator.status_cli import QueryError, parse_args, query_status
 from mycelium.node import registration
 
@@ -16,6 +17,10 @@ def _client_ssl_context(cert_path):
     context.check_hostname = False
     context.load_verify_locations(cafile=str(cert_path))
     return context
+
+
+async def _fake_identity_verifier(github_token: str) -> github_identity.GithubIdentity:
+    return github_identity.GithubIdentity(id="1", login="octocat")
 
 
 def test_parse_args_requires_all_three_flags():
@@ -45,7 +50,9 @@ async def test_query_status_returns_empty_list_when_no_nodes_registered(tmp_path
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
         port = coordinator.sockets[0].getsockname()[1]
         nodes = await query_status(f"wss://127.0.0.1:{port}", cert_path, "secret-token")
 
@@ -57,21 +64,29 @@ async def test_query_status_returns_registered_node(tmp_path):
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
         port = coordinator.sockets[0].getsockname()[1]
         client_ctx = _client_ssl_context(cert_path)
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as node_ws:
             private_key = crypto.generate_keypair()
             public_key = crypto.public_key_b64(private_key)
             await registration.register(
-                node_ws, token="secret-token", model="Qwen/Qwen2.5-7B-Instruct", node_id="node-a",
+                node_ws, model="Qwen/Qwen2.5-7B-Instruct", node_id="node-a",
                 public_key=public_key, signature=crypto.sign_public_key(private_key),
+                github_token="valid-github-token",
             )
 
             nodes = await query_status(f"wss://127.0.0.1:{port}", cert_path, "secret-token")
 
     assert nodes == [
-        {"node_id": "node-a", "model": "Qwen/Qwen2.5-7B-Instruct", "fingerprint": crypto.fingerprint(public_key)}
+        {
+            "node_id": "node-a",
+            "model": "Qwen/Qwen2.5-7B-Instruct",
+            "fingerprint": crypto.fingerprint(public_key),
+            "identity": "octocat",
+        }
     ]
 
 
@@ -80,7 +95,9 @@ async def test_query_status_raises_on_wrong_token(tmp_path):
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
         port = coordinator.sockets[0].getsockname()[1]
         with pytest.raises(QueryError, match="rejected"):
             await query_status(f"wss://127.0.0.1:{port}", cert_path, "wrong-token")
