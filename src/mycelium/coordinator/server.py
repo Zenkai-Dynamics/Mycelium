@@ -17,13 +17,14 @@ from __future__ import annotations
 import asyncio
 import json
 import ssl
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 import websockets
 
 from mycelium import crypto
-from mycelium.coordinator import router
-from mycelium.coordinator.registry import Node, NodeRegistry
+from mycelium.coordinator import github_identity, router
+from mycelium.coordinator.registry import MissingGithubToken, Node, NodeRegistry
 
 # These three also double as #9's node-liveness mechanism: a silent node
 # (no pong within PING_TIMEOUT_SECONDS of a ping) has the library start a
@@ -37,7 +38,14 @@ from mycelium.coordinator.registry import Node, NodeRegistry
 PING_INTERVAL_SECONDS = 20
 PING_TIMEOUT_SECONDS = 20
 CLOSE_TIMEOUT_SECONDS = 10
-FIRST_MESSAGE_TIMEOUT_SECONDS = 10.0
+# Bumped from 10.0 (issue #39): registration can now involve a GitHub API
+# call (NodeRegistry.resolve_identity), bounded at
+# github_identity.VERIFY_TIMEOUT_SECONDS (5s). Kept numerically equal to
+# registration.REGISTRATION_TIMEOUT_SECONDS by convention (see
+# test_server_and_registration_agree_on_timeout_settings in
+# tests/test_integration.py) — this constant's own job (bounding time to
+# receive the first message at all) doesn't itself depend on GitHub.
+FIRST_MESSAGE_TIMEOUT_SECONDS = 15.0
 
 # Fire-and-forget cleanup tasks (closing a superseded connection) must keep
 # a reference somewhere, or asyncio may garbage-collect them mid-execution.
@@ -190,13 +198,6 @@ async def _handle_status_query(websocket, registry: NodeRegistry, message: dict)
 
 
 async def _handle_registration(websocket, registry: NodeRegistry, message: dict) -> None:
-    if not registry.check_token(message.get("token")):
-        await websocket.send(json.dumps(
-            {"type": "registration_rejected", "reason": "invalid or missing token"}
-        ))
-        await websocket.close()
-        return
-
     node_id = message.get("node_id")
     model = message.get("model")
     if not node_id or not model:
@@ -223,9 +224,34 @@ async def _handle_registration(websocket, registry: NodeRegistry, message: dict)
         return
 
     # Collapse non-canonical base64 spellings of the same raw key to one
-    # string, so the registry's string-keyed dict can't be handed the same
-    # key twice under different spellings — see crypto.canonical_public_key.
+    # string, so the registry's string-keyed dicts can't be handed the
+    # same key twice under different spellings — see
+    # crypto.canonical_public_key.
     public_key = crypto.canonical_public_key(public_key)
+
+    try:
+        await registry.resolve_identity(public_key, message.get("github_token"))
+    except MissingGithubToken:
+        await websocket.send(json.dumps({
+            "type": "registration_rejected",
+            "reason": "github_token is required for first-time registration",
+        }))
+        await websocket.close()
+        return
+    except github_identity.InvalidGithubToken:
+        await websocket.send(json.dumps({
+            "type": "registration_rejected",
+            "reason": "invalid or expired GitHub token",
+        }))
+        await websocket.close()
+        return
+    except github_identity.IdentityVerificationError:
+        await websocket.send(json.dumps({
+            "type": "registration_rejected",
+            "reason": "could not reach GitHub to verify identity, try again",
+        }))
+        await websocket.close()
+        return
 
     superseded = registry.register(public_key, node_id, model, websocket)
     # Captured once, right now — never re-fetched from the registry later.
@@ -270,14 +296,26 @@ def build_ssl_context(cert_path: Path, key_path: Path) -> ssl.SSLContext:
     return context
 
 
-def serve(host: str, port: int, cert_path: Path, key_path: Path, token: str):
+def serve(
+    host: str,
+    port: int,
+    cert_path: Path,
+    key_path: Path,
+    token: str,
+    identity_verifier: Callable[[str], Awaitable] | None = None,
+):
     """Start the coordinator's node-facing WebSocket server.
+
+    identity_verifier overrides the real GitHub identity check (see
+    mycelium.coordinator.github_identity.verify_identity) — production
+    callers leave it unset; tests inject a fake so no test ever makes a
+    real network call to GitHub. See the design doc for issue #39.
 
     Returns whatever `websockets.serve` returns: awaitable to get a `Server`
     instance directly, or usable as `async with serve(...) as server:`.
     """
     ssl_context = build_ssl_context(cert_path, key_path)
-    registry = NodeRegistry(token)
+    registry = NodeRegistry(token, identity_verifier=identity_verifier)
 
     async def handler(websocket):
         await _handle_node(websocket, registry)
