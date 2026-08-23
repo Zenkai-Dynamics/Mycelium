@@ -1489,13 +1489,86 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 ## Task 6: Fix remaining call sites, run the full suite
 
 **Files:**
+- Modify: `tests/client/test_cli.py`
 - Modify: `tests/coordinator/test_status_cli.py`
 - Modify: `tests/test_integration.py`
 
 **Interfaces:**
 - Consumes: everything from Tasks 1-5.
 
-- [ ] **Step 1: Fix `tests/coordinator/test_status_cli.py`**
+**Note added during Task 3's fix-loop:** `tests/client/test_cli.py` was missed
+when this plan was originally written — it has a direct, hand-built
+registration payload sent to a real `server.serve(...)` in
+`test_complete_returns_text_on_success`, the same shape of gap Task 4 and
+this task's other two steps already cover. Found by running the full suite
+after Task 3 landed (`test_complete_returns_text_on_success` failed with
+`"github_token is required for first-time registration"`).
+
+- [ ] **Step 1: Fix `tests/client/test_cli.py`**
+
+Add this import near the top (with the other `mycelium` imports):
+
+```python
+from mycelium.coordinator import github_identity
+```
+
+Add a fake verifier after the imports:
+
+```python
+async def _fake_identity_verifier(github_token: str) -> github_identity.GithubIdentity:
+    return github_identity.GithubIdentity(id="1", login="octocat")
+```
+
+`test_complete_returns_text_on_success` is the only test in this file that registers a node — update its `server.serve(...)` call and registration payload:
+
+```python
+async def test_complete_returns_text_on_success(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as node_ws:
+            private_key = crypto.generate_keypair()
+            await node_ws.send(json.dumps({
+                "type": "register", "model": "m", "node_id": "node-a",
+                "public_key": crypto.public_key_b64(private_key),
+                "signature": crypto.sign_public_key(private_key),
+                "github_token": "valid-github-token",
+            }))
+            await node_ws.recv()
+
+            async def fake_node():
+                raw = await node_ws.recv()
+                msg = json.loads(raw)
+                await node_ws.send(json.dumps({
+                    "type": "complete_result",
+                    "request_id": msg["request_id"],
+                    "text": f"echo: {msg['prompt']}",
+                }))
+
+            node_task = asyncio.create_task(fake_node())
+
+            text = await complete(
+                f"wss://127.0.0.1:{port}", cert_path, "secret-token", "m", "hello"
+            )
+            await node_task
+
+    assert text == "echo: hello"
+```
+
+(only the `server.serve(...)` call and the registration payload dict change — the rest of the test, including the `fake_node`/`complete()` call, is untouched.)
+
+`test_complete_raises_on_error_reply` and `test_complete_raises_on_wrong_token` need no changes — neither registers a node.
+
+Run: `.venv/bin/pytest tests/client/test_cli.py -v`
+Expected: PASS (5 tests)
+
+- [ ] **Step 2: Fix `tests/coordinator/test_status_cli.py`**
 
 Add this import near the top:
 
@@ -1557,7 +1630,7 @@ async def test_query_status_returns_registered_node(tmp_path):
 Run: `.venv/bin/pytest tests/coordinator/test_status_cli.py -v`
 Expected: PASS (5 tests)
 
-- [ ] **Step 2: Fix `tests/test_integration.py`**
+- [ ] **Step 3: Fix `tests/test_integration.py`**
 
 Add this import near the top:
 
@@ -1595,16 +1668,16 @@ In `test_full_round_trip_client_through_coordinator_to_node_and_back`, update th
 Run: `.venv/bin/pytest tests/test_integration.py -v`
 Expected: PASS (4 tests)
 
-- [ ] **Step 3: Run the full suite**
+- [ ] **Step 4: Run the full suite**
 
 Run: `.venv/bin/pytest -q`
 Expected: PASS, zero failures
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add tests/coordinator/test_status_cli.py tests/test_integration.py
-git commit -m "test: fix status_cli/integration call sites broken by github_token param (issue #39)
+git add tests/client/test_cli.py tests/coordinator/test_status_cli.py tests/test_integration.py
+git commit -m "test: fix client/status_cli/integration call sites broken by github_token param (issue #39)
 
 Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 ```
