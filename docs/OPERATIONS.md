@@ -43,10 +43,13 @@ below).
 
 ## Step 1 — Create a shared token
 
-Anyone connecting — every node, every client — authenticates with the
-same secret token, compared with `hmac.compare_digest` (not sent as a
-CLI flag or environment variable; always a file). Generate one and put
-it somewhere only you can read:
+Every **client** request (and the coordinator's own bootstrap) authenticates
+with the same secret token, compared with `hmac.compare_digest` (not sent
+as a CLI flag or environment variable; always a file). **Nodes no longer
+use this token** (see Step 3) — as of issue #39, a node's identity is its
+own self-generated keypair plus a one-time GitHub sign-in, not a shared
+secret. Generate the client/coordinator token and put it somewhere only
+you can read:
 
 ```bash
 mkdir -p ~/.mycelium
@@ -54,10 +57,9 @@ openssl rand -hex 32 > ~/.mycelium/token
 chmod 600 ~/.mycelium/token
 ```
 
-Copy this same file (or its contents) to every node and every client
-machine — `scp ~/.mycelium/token <node-host>:~/.mycelium/token`, etc.
-Anyone who has it can register a node or submit completions, so treat it
-like a password.
+Copy this same file (or its contents) to every client machine —
+`scp ~/.mycelium/token <client-host>:~/.mycelium/token`, etc. Anyone who
+has it can submit completions, so treat it like a password.
 
 ## Step 2 — Start the coordinator
 
@@ -100,14 +102,34 @@ scp ~/.mycelium/coordinator-cert.pem <node-host>:~/.mycelium/coordinator-cert.pe
 ## Step 3 — Start a node
 
 On a GPU machine, with the `node` extra installed (see
-[SETUP.md](SETUP.md)'s Node/GPU setup section) and both the token file
-and the coordinator's cert copied over:
+[SETUP.md](SETUP.md)'s Node/GPU setup section) and the coordinator's cert
+copied over, a node authenticates with its own self-generated keypair
+plus a one-time GitHub sign-in (issue #39) — not the shared token from
+Step 1.
+
+**Get a GitHub token for the node's first registration.** Until issue #34
+adds a built-in device-flow sign-in, obtain one by hand — e.g.
+`gh auth token` if you have the GitHub CLI authenticated, or a Personal
+Access Token from `github.com/settings/tokens` (classic or fine-grained;
+no scopes are required, since only `GET /user` is called). Save it to a
+file only the node can read:
+
+```bash
+echo "<your-github-token>" > ~/.mycelium/github-token
+chmod 600 ~/.mycelium/github-token
+```
+
+This is only needed the **first** time this node's keypair registers —
+the coordinator remembers the binding for as long as it keeps running
+(see the limitation below), and a reconnecting node with an
+already-known public key is accepted without it. It's harmless to keep
+passing `--github-token-file` on every run regardless.
 
 ```bash
 mycelium-node \
   --coordinator-url wss://<coordinator-ip>:8765 \
   --coordinator-cert ~/.mycelium/coordinator-cert.pem \
-  --token-file ~/.mycelium/token
+  --github-token-file ~/.mycelium/github-token
 ```
 
 The node agent shells out to a bare `vllm` command (not a path inside
@@ -129,9 +151,10 @@ What happens:
    against the pinned `--coordinator-cert`.
 3. Generates (on first run only — persisted afterward) an Ed25519
    keypair at `~/.mycelium/node-key.pem` by default, override with
-   `--node-key-file`. Sends a registration message (token + model +
-   node ID + public key + a signature proving it holds the matching
-   private key) and waits for the coordinator to ack it.
+   `--node-key-file`. Sends a registration message (model + node ID +
+   public key + a signature proving it holds the matching private key,
+   plus the GitHub token from `--github-token-file` if this is the
+   key's first registration) and waits for the coordinator to ack it.
 4. Holds the connection open, handling completion requests the
    coordinator routes to it, until the connection drops — then
    reconnects automatically with exponential backoff (1s, doubling,
@@ -168,6 +191,16 @@ Each co-located node also needs its own `--node-key-file` — the default
 `~/.mycelium/node-key.pem` path is shared, so two node processes on one
 machine would otherwise silently load the *same* keypair and register as
 one indistinguishable identity to the coordinator.
+
+**A coordinator restart forgets every node's GitHub binding** (issue
+#39) — bindings are in-memory only, exactly like the rest of the
+coordinator's registry. Combined with GitHub OAuth's default 8-hour
+access-token expiry, a volunteer's saved `--github-token-file` is quite
+likely already expired by the time any coordinator restart happens, so a
+restart can force a fresh GitHub sign-in, not just a free reconnect.
+Whoever registers Mycelium's GitHub OAuth App (issue #34) should turn
+*off* "Expire user access tokens" in that app's settings to avoid this
+for real deployments.
 
 `SIGTERM`/`SIGHUP`/`Ctrl-C` all stop `vllm serve` cleanly (process-group
 kill, no orphaned GPU processes) before the node agent exits.
