@@ -4,7 +4,8 @@ import base64
 import hashlib
 import pytest
 
-from mycelium.coordinator.registry import NodeRegistry
+from mycelium.coordinator import github_identity
+from mycelium.coordinator.registry import MissingGithubToken, NodeRegistry
 
 # Valid base64-encoded 32-byte public keys (matching Ed25519 length)
 # Generated from raw bytes (32 bytes each) for testing purposes.
@@ -20,6 +21,12 @@ def _expected_fingerprint(raw: bytes) -> str:
     already-raw bytes; callers base64-decode first (e.g. `_expected_fingerprint(b"a" * 32)`).
     Never calls crypto.fingerprint() — this tests the formula itself."""
     return hashlib.sha256(raw).hexdigest()[:FINGERPRINT_LENGTH]
+
+
+async def _fake_verifier(github_token: str) -> github_identity.GithubIdentity:
+    if github_token == "bad-token":
+        raise github_identity.InvalidGithubToken("bad token")
+    return github_identity.GithubIdentity(id="42", login="octocat")
 
 
 def test_check_token_accepts_matching_token():
@@ -45,6 +52,7 @@ def test_register_adds_node_to_list():
             "node_id": "node-a",
             "model": "Qwen/Qwen2.5-7B-Instruct",
             "fingerprint": _expected_fingerprint(b"a" * 32),
+            "identity": None,
         }
     ]
 
@@ -66,6 +74,7 @@ def test_register_replacing_same_public_key_returns_superseded_entry():
             "node_id": "node-a",
             "model": "model-b",
             "fingerprint": _expected_fingerprint(b"a" * 32),
+            "identity": None,
         }
     ]
 
@@ -105,6 +114,7 @@ def test_unregister_does_not_remove_a_newer_replacement():
             "node_id": "node-a",
             "model": "model-b",
             "fingerprint": _expected_fingerprint(b"a" * 32),
+            "identity": None,
         }
     ]
 
@@ -226,3 +236,102 @@ def test_new_node_has_empty_pending_dict():
     registry = NodeRegistry("secret")
     registry.register(PUBKEY_A, "node-a", "model-a", websocket="ws-a")
     assert registry.get(PUBKEY_A).pending == {}
+
+
+async def test_resolve_identity_binds_and_returns_identity_with_valid_token():
+    registry = NodeRegistry("secret", identity_verifier=_fake_verifier)
+    identity = await registry.resolve_identity(PUBKEY_A, "good-token")
+    assert identity == github_identity.GithubIdentity(id="42", login="octocat")
+
+
+async def test_resolve_identity_raises_missing_token_when_key_unbound_and_no_token():
+    registry = NodeRegistry("secret", identity_verifier=_fake_verifier)
+    try:
+        await registry.resolve_identity(PUBKEY_A, None)
+        assert False, "expected MissingGithubToken"
+    except MissingGithubToken:
+        pass
+
+
+async def test_resolve_identity_raises_missing_token_for_empty_string_token():
+    registry = NodeRegistry("secret", identity_verifier=_fake_verifier)
+    try:
+        await registry.resolve_identity(PUBKEY_A, "")
+        assert False, "expected MissingGithubToken"
+    except MissingGithubToken:
+        pass
+
+
+async def test_resolve_identity_propagates_verifier_error_for_invalid_token():
+    registry = NodeRegistry("secret", identity_verifier=_fake_verifier)
+    try:
+        await registry.resolve_identity(PUBKEY_A, "bad-token")
+        assert False, "expected InvalidGithubToken"
+    except github_identity.InvalidGithubToken:
+        pass
+
+
+async def test_resolve_identity_ignores_token_and_reuses_binding_on_reconnect():
+    registry = NodeRegistry("secret", identity_verifier=_fake_verifier)
+    first = await registry.resolve_identity(PUBKEY_A, "good-token")
+    # A DIFFERENT (even invalid) token on a later call is ignored entirely
+    # once the key is bound — see the design doc for issue #39.
+    second = await registry.resolve_identity(PUBKEY_A, "bad-token")
+    assert second == first
+
+
+async def test_resolve_identity_does_not_call_verifier_again_once_bound():
+    call_count = 0
+
+    async def counting_verifier(github_token):
+        nonlocal call_count
+        call_count += 1
+        return github_identity.GithubIdentity(id="42", login="octocat")
+
+    registry = NodeRegistry("secret", identity_verifier=counting_verifier)
+    await registry.resolve_identity(PUBKEY_A, "good-token")
+    await registry.resolve_identity(PUBKEY_A, None)
+    await registry.resolve_identity(PUBKEY_A, "good-token")
+    assert call_count == 1
+
+
+async def test_two_different_public_keys_can_bind_independently():
+    registry = NodeRegistry("secret", identity_verifier=_fake_verifier)
+    identity_a = await registry.resolve_identity(PUBKEY_A, "good-token")
+    identity_b = await registry.resolve_identity(PUBKEY_B, "good-token")
+    assert identity_a == identity_b  # same fake identity, different keys — no cap in this ticket (#35)
+
+
+def test_list_nodes_shows_none_identity_when_never_resolved():
+    registry = NodeRegistry("secret")
+    registry.register(PUBKEY_A, "node-a", "model-a", websocket="ws-a")
+    assert registry.list_nodes() == [
+        {
+            "node_id": "node-a",
+            "model": "model-a",
+            "fingerprint": _expected_fingerprint(b"a" * 32),
+            "identity": None,
+        }
+    ]
+
+
+async def test_list_nodes_shows_login_after_resolve_identity():
+    registry = NodeRegistry("secret", identity_verifier=_fake_verifier)
+    await registry.resolve_identity(PUBKEY_A, "good-token")
+    registry.register(PUBKEY_A, "node-a", "model-a", websocket="ws-a")
+    assert registry.list_nodes() == [
+        {
+            "node_id": "node-a",
+            "model": "model-a",
+            "fingerprint": _expected_fingerprint(b"a" * 32),
+            "identity": "octocat",
+        }
+    ]
+
+
+def test_node_registry_without_identity_verifier_still_constructs():
+    # No identity_verifier given — must default internally, not raise or
+    # require the caller to know about identity verification at all.
+    registry = NodeRegistry("secret")
+    registry.register(PUBKEY_A, "node-a", "model-a", websocket="ws-a")
+    assert registry.get(PUBKEY_A) is not None
