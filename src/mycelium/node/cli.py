@@ -26,7 +26,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="mycelium-node")
     parser.add_argument("--coordinator-url", default=None)
     parser.add_argument("--coordinator-cert", type=Path, default=None)
-    parser.add_argument("--token-file", type=Path, default=None)
+    parser.add_argument("--github-token-file", type=Path, default=None)
     parser.add_argument("--node-id", default=None)
     parser.add_argument("--node-key-file", type=Path, default=identity.DEFAULT_KEY_PATH)
     parser.add_argument("--model", default=DEFAULT_MODEL)
@@ -45,23 +45,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--coordinator-url and --coordinator-cert must be given together")
     if not (has_url and has_cert) and args.prompt is None:
         parser.error("either --coordinator-url/--coordinator-cert or --prompt is required")
-    if has_url and args.token_file is None:
-        parser.error("--token-file is required when connecting to a coordinator")
 
     return args
 
 
 async def _run(args: argparse.Namespace, process: VLLMProcess) -> None:
-    token = None
     node_id = None
+    public_key = None
+    signature = None
+    github_token = None
     if args.prompt is None:
-        token = args.token_file.read_text().strip()
-        if not token:
-            raise SystemExit(f"--token-file at {args.token_file} is empty")
         node_id = args.node_id or socket.gethostname()
         private_key = identity.load_or_create_keypair(args.node_key_file)
         public_key = crypto.public_key_b64(private_key)
         signature = crypto.sign_public_key(private_key)
+        if args.github_token_file is not None:
+            github_token = args.github_token_file.read_text().strip()
+            if not github_token:
+                raise SystemExit(f"--github-token-file at {args.github_token_file} is empty")
 
     print(f"starting vLLM ({args.model} on GPU {args.gpu})...", flush=True)
     await asyncio.to_thread(process.start)
@@ -80,8 +81,8 @@ async def _run(args: argparse.Namespace, process: VLLMProcess) -> None:
             print(f"connected to coordinator ({args.coordinator_url})", flush=True)
             try:
                 await registration.register(
-                    websocket, token=token, model=args.model, node_id=node_id,
-                    public_key=public_key, signature=signature,
+                    websocket, model=args.model, node_id=node_id,
+                    public_key=public_key, signature=signature, github_token=github_token,
                 )
                 print(f"registered with coordinator as {node_id!r}", flush=True)
                 registration_backoff = connection.reconnect_delays()  # reset after success
