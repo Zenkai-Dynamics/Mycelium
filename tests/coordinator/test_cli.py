@@ -24,6 +24,22 @@ def test_parse_args_overrides(tmp_path):
     assert args.port == 9000
 
 
+def test_parse_args_per_identity_cap_default(tmp_path):
+    token_file = tmp_path / "token"
+    token_file.write_text("secret\n")
+    args = parse_args(["--token-file", str(token_file)])
+    assert args.per_identity_cap == 3
+
+
+def test_parse_args_per_identity_cap_override(tmp_path):
+    token_file = tmp_path / "token"
+    token_file.write_text("secret\n")
+    args = parse_args(
+        ["--token-file", str(token_file), "--per-identity-cap", "5"]
+    )
+    assert args.per_identity_cap == 5
+
+
 def test_parse_args_requires_token_file():
     with pytest.raises(SystemExit):
         parse_args([])
