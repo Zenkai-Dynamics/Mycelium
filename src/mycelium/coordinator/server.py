@@ -24,7 +24,7 @@ import websockets
 
 from mycelium import crypto
 from mycelium.coordinator import github_identity, router
-from mycelium.coordinator.registry import MissingGithubToken, Node, NodeRegistry
+from mycelium.coordinator.registry import IdentityCapReached, MissingGithubToken, Node, NodeRegistry
 
 # These three also double as #9's node-liveness mechanism: a silent node
 # (no pong within PING_TIMEOUT_SECONDS of a ping) has the library start a
@@ -230,7 +230,7 @@ async def _handle_registration(websocket, registry: NodeRegistry, message: dict)
     public_key = crypto.canonical_public_key(public_key)
 
     try:
-        await registry.resolve_identity(public_key, message.get("github_token"))
+        identity = await registry.resolve_identity(public_key, message.get("github_token"))
     except MissingGithubToken:
         await websocket.send(json.dumps({
             "type": "registration_rejected",
@@ -249,6 +249,16 @@ async def _handle_registration(websocket, registry: NodeRegistry, message: dict)
         await websocket.send(json.dumps({
             "type": "registration_rejected",
             "reason": "could not reach GitHub to verify identity, try again",
+        }))
+        await websocket.close()
+        return
+
+    try:
+        registry.enforce_identity_cap(public_key, identity)
+    except IdentityCapReached as exc:
+        await websocket.send(json.dumps({
+            "type": "registration_rejected",
+            "reason": str(exc),
         }))
         await websocket.close()
         return
@@ -303,6 +313,7 @@ def serve(
     key_path: Path,
     token: str,
     identity_verifier: Callable[[str], Awaitable] | None = None,
+    per_identity_cap: int | None = None,
 ):
     """Start the coordinator's node-facing WebSocket server.
 
@@ -311,11 +322,24 @@ def serve(
     callers leave it unset; tests inject a fake so no test ever makes a
     real network call to GitHub. See the design doc for issue #39.
 
+    per_identity_cap overrides NodeRegistry's default Sybil-resistance
+    cap (3) — production callers leave it unset unless the operator
+    configured a different value via mycelium-coordinator's
+    --per-identity-cap flag. See the design doc for issue #35. Resolved
+    to the literal default here (not passed through as None) because
+    NodeRegistry.__init__ takes an ordinary `int = 3` default, not a
+    None-accepting parameter — `None >= 3` would raise inside
+    enforce_identity_cap if passed through unconditionally.
+
     Returns whatever `websockets.serve` returns: awaitable to get a `Server`
     instance directly, or usable as `async with serve(...) as server:`.
     """
     ssl_context = build_ssl_context(cert_path, key_path)
-    registry = NodeRegistry(token, identity_verifier=identity_verifier)
+    registry = NodeRegistry(
+        token,
+        identity_verifier=identity_verifier,
+        per_identity_cap=per_identity_cap if per_identity_cap is not None else 3,
+    )
 
     async def handler(websocket):
         await _handle_node(websocket, registry)

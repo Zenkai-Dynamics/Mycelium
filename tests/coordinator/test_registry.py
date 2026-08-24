@@ -5,13 +5,14 @@ import hashlib
 import pytest
 
 from mycelium.coordinator import github_identity
-from mycelium.coordinator.registry import MissingGithubToken, NodeRegistry
+from mycelium.coordinator.registry import IdentityCapReached, MissingGithubToken, NodeRegistry
 
 # Valid base64-encoded 32-byte public keys (matching Ed25519 length)
 # Generated from raw bytes (32 bytes each) for testing purposes.
 PUBKEY_A = base64.b64encode(b"a" * 32).decode()
 PUBKEY_B = base64.b64encode(b"b" * 32).decode()
 PUBKEY_C = base64.b64encode(b"c" * 32).decode()
+PUBKEY_D = base64.b64encode(b"d" * 32).decode()
 
 FINGERPRINT_LENGTH = 12
 
@@ -335,3 +336,96 @@ def test_node_registry_without_identity_verifier_still_constructs():
     registry = NodeRegistry("secret")
     registry.register(PUBKEY_A, "node-a", "model-a", websocket="ws-a")
     assert registry.get(PUBKEY_A) is not None
+
+
+async def test_enforce_identity_cap_allows_registration_below_cap():
+    registry = NodeRegistry("secret", identity_verifier=_fake_verifier, per_identity_cap=3)
+    identity = await registry.resolve_identity(PUBKEY_A, "good-token")
+    registry.register(PUBKEY_A, "node-a", "m", websocket="ws-a")
+
+    # Only 1 of this identity's nodes is registered so far; cap is 3.
+    registry.enforce_identity_cap(PUBKEY_B, identity)  # must not raise
+
+
+async def test_enforce_identity_cap_raises_when_at_cap():
+    registry = NodeRegistry("secret", identity_verifier=_fake_verifier, per_identity_cap=2)
+    identity = await registry.resolve_identity(PUBKEY_A, "good-token")
+    registry.register(PUBKEY_A, "node-a", "m", websocket="ws-a")
+    await registry.resolve_identity(PUBKEY_B, "good-token")
+    registry.register(PUBKEY_B, "node-b", "m", websocket="ws-b")
+
+    try:
+        registry.enforce_identity_cap(PUBKEY_C, identity)
+        assert False, "expected IdentityCapReached"
+    except IdentityCapReached as exc:
+        assert str(exc) == "identity has reached the maximum of 2 registered nodes"
+
+
+async def test_enforce_identity_cap_exempts_already_registered_key():
+    registry = NodeRegistry("secret", identity_verifier=_fake_verifier, per_identity_cap=1)
+    identity = await registry.resolve_identity(PUBKEY_A, "good-token")
+    registry.register(PUBKEY_A, "node-a", "m", websocket="ws-a")
+
+    # PUBKEY_A already occupies the (only) slot — re-checking the SAME key
+    # (a reconnect) must not raise, even though the identity is "at" cap.
+    registry.enforce_identity_cap(PUBKEY_A, identity)  # must not raise
+
+
+async def test_enforce_identity_cap_frees_a_slot_on_unregister():
+    registry = NodeRegistry("secret", identity_verifier=_fake_verifier, per_identity_cap=1)
+    identity = await registry.resolve_identity(PUBKEY_A, "good-token")
+    registry.register(PUBKEY_A, "node-a", "m", websocket="ws-a")
+
+    try:
+        registry.enforce_identity_cap(PUBKEY_B, identity)
+        assert False, "expected IdentityCapReached"
+    except IdentityCapReached:
+        pass
+
+    registry.unregister(PUBKEY_A, websocket="ws-a")
+
+    registry.enforce_identity_cap(PUBKEY_B, identity)  # must not raise now
+
+
+async def test_enforce_identity_cap_counts_only_the_matching_identity():
+    async def two_identity_verifier(github_token):
+        if github_token == "token-x":
+            return github_identity.GithubIdentity(id="X", login="x-user")
+        return github_identity.GithubIdentity(id="Y", login="y-user")
+
+    registry = NodeRegistry("secret", identity_verifier=two_identity_verifier, per_identity_cap=1)
+    await registry.resolve_identity(PUBKEY_A, "token-x")
+    registry.register(PUBKEY_A, "node-a", "m", websocket="ws-a")
+
+    identity_y = await registry.resolve_identity(PUBKEY_B, "token-y")
+
+    # Identity X is at its cap of 1, but identity Y has 0 registered nodes
+    # of its own — must not be blocked by X's count.
+    registry.enforce_identity_cap(PUBKEY_B, identity_y)  # must not raise
+
+
+async def test_enforce_identity_cap_default_is_3():
+    registry = NodeRegistry("secret", identity_verifier=_fake_verifier)  # no override
+    identity = await registry.resolve_identity(PUBKEY_A, "good-token")
+    registry.register(PUBKEY_A, "node-a", "m", websocket="ws-a")
+    await registry.resolve_identity(PUBKEY_B, "good-token")
+    registry.register(PUBKEY_B, "node-b", "m", websocket="ws-b")
+    await registry.resolve_identity(PUBKEY_C, "good-token")
+    registry.register(PUBKEY_C, "node-c", "m", websocket="ws-c")
+
+    try:
+        registry.enforce_identity_cap(PUBKEY_D, identity)
+        assert False, "expected IdentityCapReached"
+    except IdentityCapReached as exc:
+        assert str(exc) == "identity has reached the maximum of 3 registered nodes"
+
+
+def test_enforce_identity_cap_zero_blocks_all_new_registrations():
+    registry = NodeRegistry("secret", per_identity_cap=0)
+    identity = github_identity.GithubIdentity(id="42", login="octocat")
+
+    try:
+        registry.enforce_identity_cap(PUBKEY_A, identity)
+        assert False, "expected IdentityCapReached"
+    except IdentityCapReached as exc:
+        assert str(exc) == "identity has reached the maximum of 0 registered nodes"
