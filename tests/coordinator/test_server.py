@@ -606,24 +606,29 @@ async def test_registration_reconnect_of_existing_key_not_blocked_by_identity_ca
         public_key = crypto.public_key_b64(private_key)
         signature = crypto.sign_public_key(private_key)
 
-        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as first_ws:
-            await first_ws.send(json.dumps({
-                "type": "register", "model": "m", "node_id": "node-a",
-                "public_key": public_key, "signature": signature,
-                "github_token": "valid-github-token",
-            }))
-            await first_ws.recv()
+        old_ws = await websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx)
+        await old_ws.send(json.dumps({
+            "type": "register", "model": "m", "node_id": "node-a",
+            "public_key": public_key, "signature": signature,
+            "github_token": "valid-github-token",
+        }))
+        await old_ws.recv()
 
-        # Reconnect with the SAME key — already occupies the (only) cap
-        # slot, so this must succeed even though the identity is nominally
-        # "at" its cap of 1.
-        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as second_ws:
-            await second_ws.send(json.dumps({
+        # Register AGAIN under the SAME key while old_ws is still open and
+        # still occupying the (only) cap slot — the cap must not block
+        # this, since it's the same key re-registering (a reconnect), not
+        # a new one. If the exemption were broken, this would be rejected
+        # with "identity has reached the maximum of 1 registered nodes"
+        # instead of succeeding.
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as new_ws:
+            await new_ws.send(json.dumps({
                 "type": "register", "model": "m", "node_id": "node-a",
                 "public_key": public_key, "signature": signature,
             }))
-            response = json.loads(await second_ws.recv())
+            response = json.loads(await new_ws.recv())
             assert response == {"type": "registered"}
+
+        await old_ws.close()
 
 
 async def test_duplicate_node_id_registration_acks_promptly_even_if_old_connection_is_unresponsive(tmp_path):
