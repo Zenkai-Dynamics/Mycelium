@@ -1,5 +1,6 @@
 """Tests for mycelium.coordinator.github_identity."""
 
+import http.client
 import json
 import urllib.error
 import urllib.request
@@ -15,6 +16,26 @@ class _FakeResponse:
 
     def read(self):
         return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+class _FailingReadResponse:
+    """Stand-in for a urlopen() response whose .read() itself fails mid-body
+    — e.g. a connection reset or truncated body. This happens OUTSIDE
+    urllib's own OSError -> URLError wrapping, so it must be covered
+    separately from the HTTPError/URLError cases above. See Finding 1 of
+    the final whole-branch review for issue #39."""
+
+    def __init__(self, read_exc: Exception):
+        self._read_exc = read_exc
+
+    def read(self):
+        raise self._read_exc
 
     def __enter__(self):
         return self
@@ -105,6 +126,32 @@ async def test_verify_identity_raises_unreachable_on_network_error(monkeypatch):
 async def test_verify_identity_raises_unreachable_on_timeout(monkeypatch):
     def fake_urlopen(request, timeout):
         raise TimeoutError("timed out")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    try:
+        await github_identity.verify_identity("any-token")
+        assert False, "expected GithubUnreachable"
+    except github_identity.GithubUnreachable:
+        pass
+
+
+async def test_verify_identity_raises_unreachable_on_incomplete_read(monkeypatch):
+    def fake_urlopen(request, timeout):
+        return _FailingReadResponse(http.client.IncompleteRead(b"partial"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    try:
+        await github_identity.verify_identity("any-token")
+        assert False, "expected GithubUnreachable"
+    except github_identity.GithubUnreachable:
+        pass
+
+
+async def test_verify_identity_raises_unreachable_on_connection_reset_during_read(monkeypatch):
+    def fake_urlopen(request, timeout):
+        return _FailingReadResponse(ConnectionResetError("connection reset by peer"))
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 

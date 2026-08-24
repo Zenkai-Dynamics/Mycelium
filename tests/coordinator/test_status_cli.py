@@ -1,12 +1,13 @@
 """Tests for mycelium.coordinator.status_cli."""
 
 import ssl
+import sys
 
 import pytest
 import websockets
 
 from mycelium import crypto
-from mycelium.coordinator import certs, server
+from mycelium.coordinator import certs, server, status_cli
 from mycelium.coordinator import github_identity
 from mycelium.coordinator.status_cli import QueryError, parse_args, query_status
 from mycelium.node import registration
@@ -88,6 +89,82 @@ async def test_query_status_returns_registered_node(tmp_path):
             "identity": "octocat",
         }
     ]
+
+
+def test_main_prints_bound_github_identity(tmp_path, monkeypatch, capsys):
+    """See Finding 3 of the final whole-branch review for issue #39:
+    list_nodes() already returns an "identity" field, but main()'s print
+    loop never displayed it. query_status() is faked here so this test
+    exercises main()'s own output formatting, not the network path
+    (already covered by test_query_status_returns_registered_node)."""
+    cert_path = tmp_path / "cert.pem"
+    cert_path.write_text("placeholder")
+    token_file = tmp_path / "token"
+    token_file.write_text("secret")
+
+    async def fake_query_status(coordinator_url, coordinator_cert, token):
+        return [
+            {
+                "node_id": "node-a",
+                "model": "Qwen/Qwen2.5-7B-Instruct",
+                "fingerprint": "a1b2c3d4e5f6",
+                "identity": "octocat",
+            }
+        ]
+
+    monkeypatch.setattr(status_cli, "query_status", fake_query_status)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "mycelium-coordinator-status",
+            "--coordinator-url", "wss://example:8765",
+            "--coordinator-cert", str(cert_path),
+            "--token-file", str(token_file),
+        ],
+    )
+
+    status_cli.main()
+
+    out = capsys.readouterr().out
+    assert out == "node-a [a1b2c3d4e5f6] (github:octocat): Qwen/Qwen2.5-7B-Instruct\n"
+
+
+def test_main_omits_identity_suffix_when_node_has_none(tmp_path, monkeypatch, capsys):
+    """A node registered without identity resolution (only possible via a
+    direct NodeRegistry.register() call, never in production) has
+    identity: None — main() must not print a bogus "(github:None)"."""
+    cert_path = tmp_path / "cert.pem"
+    cert_path.write_text("placeholder")
+    token_file = tmp_path / "token"
+    token_file.write_text("secret")
+
+    async def fake_query_status(coordinator_url, coordinator_cert, token):
+        return [
+            {
+                "node_id": "node-a",
+                "model": "m",
+                "fingerprint": "a1b2c3d4e5f6",
+                "identity": None,
+            }
+        ]
+
+    monkeypatch.setattr(status_cli, "query_status", fake_query_status)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "mycelium-coordinator-status",
+            "--coordinator-url", "wss://example:8765",
+            "--coordinator-cert", str(cert_path),
+            "--token-file", str(token_file),
+        ],
+    )
+
+    status_cli.main()
+
+    out = capsys.readouterr().out
+    assert out == "node-a [a1b2c3d4e5f6]: m\n"
 
 
 async def test_query_status_raises_on_wrong_token(tmp_path):

@@ -13,6 +13,7 @@ ever makes a real network call to GitHub.
 from __future__ import annotations
 
 import asyncio
+import http.client
 import json
 import urllib.error
 import urllib.request
@@ -73,7 +74,7 @@ def _fetch_user(github_token: str) -> GithubIdentity:
         if exc.code in (401, 403):
             raise InvalidGithubToken(f"GitHub rejected the token: HTTP {exc.code}") from exc
         raise GithubUnreachable(f"unexpected GitHub response: HTTP {exc.code}") from exc
-    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+    except (OSError, http.client.HTTPException, ValueError) as exc:
         raise GithubUnreachable(f"could not reach GitHub: {exc}") from exc
 
     try:

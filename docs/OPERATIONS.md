@@ -226,7 +226,7 @@ mycelium-coordinator-status \
 ```
 
 ```
-your-hostname [a1b2c3d4e5f6]: Qwen/Qwen2.5-7B-Instruct
+your-hostname [a1b2c3d4e5f6] (github:octocat): Qwen/Qwen2.5-7B-Instruct
 ```
 
 (or `No nodes registered.` if none are currently connected).

@@ -72,11 +72,15 @@ def _register_payload(
 
 
 async def _fake_identity_verifier(github_token: str) -> github_identity.GithubIdentity:
-    """Accepts any token except the sentinel "bad-github-token" — see the
-    design doc for issue #39. Injected into every server.serve(...) call
-    in this file so no test ever makes a real network call to GitHub."""
+    """Accepts any token except the sentinels "bad-github-token" (a real
+    GitHub rejection) and "unreachable-github-token" (GitHub couldn't be
+    reached at all) — see the design doc for issue #39. Injected into
+    every server.serve(...) call in this file so no test ever makes a
+    real network call to GitHub."""
     if github_token == "bad-github-token":
         raise github_identity.InvalidGithubToken("bad token")
+    if github_token == "unreachable-github-token":
+        raise github_identity.GithubUnreachable("could not reach GitHub: timed out")
     return github_identity.GithubIdentity(id="1", login="octocat")
 
 
@@ -466,6 +470,28 @@ async def test_registration_new_key_with_invalid_github_token_is_rejected(tmp_pa
             assert response == {
                 "type": "registration_rejected",
                 "reason": "invalid or expired GitHub token",
+            }
+            with pytest.raises(websockets.exceptions.ConnectionClosed):
+                await ws.recv()
+
+
+async def test_registration_new_key_with_github_unreachable_is_rejected(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws:
+            payload, _ = _register_payload("node-a", "m", github_token="unreachable-github-token")
+            await ws.send(json.dumps(payload))
+            response = json.loads(await ws.recv())
+            assert response == {
+                "type": "registration_rejected",
+                "reason": "could not reach GitHub to verify identity, try again",
             }
             with pytest.raises(websockets.exceptions.ConnectionClosed):
                 await ws.recv()
