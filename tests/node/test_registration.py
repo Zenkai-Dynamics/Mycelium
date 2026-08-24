@@ -33,7 +33,8 @@ async def test_register_succeeds_and_returns_on_registered_response(tmp_path):
         client_ctx = connection.build_ssl_context(cert_path)
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws:
             await registration.register(
-                ws, token="secret", model="Qwen/Qwen2.5-7B-Instruct", node_id="node-a"
+                ws, token="secret", model="Qwen/Qwen2.5-7B-Instruct", node_id="node-a",
+                public_key="pubkey-a", signature="sig-a",
             )
 
     assert received == {
@@ -41,6 +42,8 @@ async def test_register_succeeds_and_returns_on_registered_response(tmp_path):
         "token": "secret",
         "model": "Qwen/Qwen2.5-7B-Instruct",
         "node_id": "node-a",
+        "public_key": "pubkey-a",
+        "signature": "sig-a",
     }
 
 
@@ -59,7 +62,8 @@ async def test_register_raises_rejected_on_registration_rejected_response(tmp_pa
         client_ctx = connection.build_ssl_context(cert_path)
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws:
             with pytest.raises(registration.RegistrationRejected, match="invalid token"):
-                await registration.register(ws, token="bad", model="m", node_id="node-a")
+                await registration.register(ws, token="bad", model="m", node_id="node-a",
+                    public_key="pubkey-a", signature="sig-a",)
 
 
 async def test_register_raises_timeout_when_coordinator_never_responds(tmp_path):
@@ -77,7 +81,8 @@ async def test_register_raises_timeout_when_coordinator_never_responds(tmp_path)
         client_ctx = connection.build_ssl_context(cert_path)
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws:
             with pytest.raises(registration.RegistrationTimeout):
-                await registration.register(ws, token="secret", model="m", node_id="node-a", timeout=0.5)
+                await registration.register(ws, token="secret", model="m", node_id="node-a",
+                    public_key="pubkey-a", signature="sig-a", timeout=0.5)
 
 
 async def test_register_raises_on_unexpected_response_type(tmp_path):
@@ -95,7 +100,8 @@ async def test_register_raises_on_unexpected_response_type(tmp_path):
         client_ctx = connection.build_ssl_context(cert_path)
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws:
             with pytest.raises(registration.RegistrationRejected):
-                await registration.register(ws, token="secret", model="m", node_id="node-a")
+                await registration.register(ws, token="secret", model="m", node_id="node-a",
+                    public_key="pubkey-a", signature="sig-a",)
 
 
 async def test_register_raises_on_malformed_json_response(tmp_path):
@@ -113,7 +119,8 @@ async def test_register_raises_on_malformed_json_response(tmp_path):
         client_ctx = connection.build_ssl_context(cert_path)
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws:
             with pytest.raises(registration.RegistrationRejected, match="malformed response"):
-                await registration.register(ws, token="secret", model="m", node_id="node-a")
+                await registration.register(ws, token="secret", model="m", node_id="node-a",
+                    public_key="pubkey-a", signature="sig-a",)
 
 
 async def test_register_raises_on_non_dict_json_response(tmp_path):
@@ -131,7 +138,8 @@ async def test_register_raises_on_non_dict_json_response(tmp_path):
         client_ctx = connection.build_ssl_context(cert_path)
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws:
             with pytest.raises(registration.RegistrationRejected, match="non-dict response"):
-                await registration.register(ws, token="secret", model="m", node_id="node-a")
+                await registration.register(ws, token="secret", model="m", node_id="node-a",
+                    public_key="pubkey-a", signature="sig-a",)
 
 
 async def test_register_raises_rejected_when_coordinator_closes_without_responding(tmp_path):
@@ -150,4 +158,5 @@ async def test_register_raises_rejected_when_coordinator_closes_without_respondi
         client_ctx = connection.build_ssl_context(cert_path)
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws:
             with pytest.raises(registration.RegistrationRejected):
-                await registration.register(ws, token="secret", model="m", node_id="node-a")
+                await registration.register(ws, token="secret", model="m", node_id="node-a",
+                    public_key="pubkey-a", signature="sig-a",)

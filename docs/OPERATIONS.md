@@ -127,8 +127,11 @@ What happens:
    (up to 5 minutes on first run, while weights download/load).
 2. Dials out to `--coordinator-url` over TLS, verifying the coordinator
    against the pinned `--coordinator-cert`.
-3. Sends a registration message (token + model + node ID) and waits for
-   the coordinator to ack it.
+3. Generates (on first run only — persisted afterward) an Ed25519
+   keypair at `~/.mycelium/node-key.pem` by default, override with
+   `--node-key-file`. Sends a registration message (token + model +
+   node ID + public key + a signature proving it holds the matching
+   private key) and waits for the coordinator to ack it.
 4. Holds the connection open, handling completion requests the
    coordinator routes to it, until the connection drops — then
    reconnects automatically with exponential backoff (1s, doubling,
@@ -161,6 +164,11 @@ response, prints `vLLM ready`, and registers anyway — silently pointing
 at the wrong node's engine. Confirmed live; not caught or warned about
 anywhere today.
 
+Each co-located node also needs its own `--node-key-file` — the default
+`~/.mycelium/node-key.pem` path is shared, so two node processes on one
+machine would otherwise silently load the *same* keypair and register as
+one indistinguishable identity to the coordinator.
+
 `SIGTERM`/`SIGHUP`/`Ctrl-C` all stop `vllm serve` cleanly (process-group
 kill, no orphaned GPU processes) before the node agent exits.
 **`kill -9` does not** — a killed process can't run its own cleanup
@@ -183,7 +191,7 @@ mycelium-coordinator-status \
 ```
 
 ```
-your-hostname: Qwen/Qwen2.5-7B-Instruct
+your-hostname [a1b2c3d4e5f6]: Qwen/Qwen2.5-7B-Instruct
 ```
 
 (or `No nodes registered.` if none are currently connected).

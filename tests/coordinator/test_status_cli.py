@@ -5,6 +5,7 @@ import ssl
 import pytest
 import websockets
 
+from mycelium import crypto
 from mycelium.coordinator import certs, server
 from mycelium.coordinator.status_cli import QueryError, parse_args, query_status
 from mycelium.node import registration
@@ -60,13 +61,18 @@ async def test_query_status_returns_registered_node(tmp_path):
         port = coordinator.sockets[0].getsockname()[1]
         client_ctx = _client_ssl_context(cert_path)
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as node_ws:
+            private_key = crypto.generate_keypair()
+            public_key = crypto.public_key_b64(private_key)
             await registration.register(
-                node_ws, token="secret-token", model="Qwen/Qwen2.5-7B-Instruct", node_id="node-a"
+                node_ws, token="secret-token", model="Qwen/Qwen2.5-7B-Instruct", node_id="node-a",
+                public_key=public_key, signature=crypto.sign_public_key(private_key),
             )
 
             nodes = await query_status(f"wss://127.0.0.1:{port}", cert_path, "secret-token")
 
-    assert nodes == [{"node_id": "node-a", "model": "Qwen/Qwen2.5-7B-Instruct"}]
+    assert nodes == [
+        {"node_id": "node-a", "model": "Qwen/Qwen2.5-7B-Instruct", "fingerprint": crypto.fingerprint(public_key)}
+    ]
 
 
 async def test_query_status_raises_on_wrong_token(tmp_path):

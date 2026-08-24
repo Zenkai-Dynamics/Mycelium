@@ -27,7 +27,7 @@ class _FakeNodeWebsocket:
 
 
 def _make_node(websocket=None) -> Node:
-    return Node(node_id="node-a", model="m", websocket=websocket or _FakeNodeWebsocket())
+    return Node(public_key="pubkey-a", node_id="node-a", model="m", websocket=websocket or _FakeNodeWebsocket())
 
 
 async def _resolve_after(node: Node, delay: float, message: dict) -> None:

@@ -93,6 +93,17 @@ def test_parse_args_overrides():
     assert args.node_id == "my-node"
 
 
+def test_parse_args_node_key_file_default():
+    from mycelium.node import identity
+    args = parse_args(["--prompt", "hi"])
+    assert args.node_key_file == identity.DEFAULT_KEY_PATH
+
+
+def test_parse_args_node_key_file_override():
+    args = parse_args(["--prompt", "hi", "--node-key-file", "/tmp/custom-key.pem"])
+    assert str(args.node_key_file) == "/tmp/custom-key.pem"
+
+
 class _FakeVLLMHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
@@ -200,6 +211,7 @@ async def test_run_registers_with_coordinator_using_token_and_node_id(
                 "--token-file", str(token_file),
                 "--node-id", "test-node",
                 "--vllm-port", str(vllm_port),
+                "--node-key-file", str(tmp_path / "node-key.pem"),
             ]
         )
         process = vllm_process.VLLMProcess(model=args.model, gpu=args.gpu, port=args.vllm_port)
@@ -211,12 +223,13 @@ async def test_run_registers_with_coordinator_using_token_and_node_id(
         except asyncio.CancelledError:
             pass
 
-    assert received == {
-        "type": "register",
-        "token": "secret-token",
-        "model": vllm_process.DEFAULT_MODEL,
-        "node_id": "test-node",
-    }
+    from mycelium import crypto
+
+    assert received["type"] == "register"
+    assert received["token"] == "secret-token"
+    assert received["model"] == vllm_process.DEFAULT_MODEL
+    assert received["node_id"] == "test-node"
+    assert crypto.verify_registration_signature(received["public_key"], received["signature"]) is True
 
 
 async def test_run_answers_a_routed_complete_request(tmp_path, monkeypatch, fake_vllm_server):
@@ -254,6 +267,7 @@ async def test_run_answers_a_routed_complete_request(tmp_path, monkeypatch, fake
                 "--token-file", str(token_file),
                 "--node-id", "test-node",
                 "--vllm-port", str(vllm_port),
+                "--node-key-file", str(tmp_path / "node-key.pem"),
             ]
         )
         process = vllm_process.VLLMProcess(model=args.model, gpu=args.gpu, port=args.vllm_port)
@@ -300,6 +314,7 @@ async def test_run_retries_after_registration_rejected(tmp_path, monkeypatch, fa
                 "--coordinator-cert", str(cert_path),
                 "--token-file", str(token_file),
                 "--vllm-port", str(vllm_port),
+                "--node-key-file", str(tmp_path / "node-key.pem"),
             ]
         )
         process = vllm_process.VLLMProcess(model=args.model, gpu=args.gpu, port=args.vllm_port)
@@ -357,6 +372,7 @@ async def test_registration_backoff_resets_after_a_successful_registration(
                 "--coordinator-cert", str(cert_path),
                 "--token-file", str(token_file),
                 "--vllm-port", str(vllm_port),
+                "--node-key-file", str(tmp_path / "node-key.pem"),
             ]
         )
         process = vllm_process.VLLMProcess(model=args.model, gpu=args.gpu, port=args.vllm_port)
@@ -463,6 +479,7 @@ def test_sigterm_stops_vllm_process_group_with_no_orphans(tmp_path):
             "--coordinator-cert", str(cert_path),
             "--token-file", str(token_file),
             "--vllm-port", str(vllm_port),
+            "--node-key-file", str(tmp_path / "node-key.pem"),
         ],
         env=env,
     )
