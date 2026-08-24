@@ -82,6 +82,11 @@ mycelium-coordinator --token-file ~/.mycelium/token --cert-san-ip <coordinator-i
 - Default listen address: `0.0.0.0:8765`. Override with `--host`/`--port`.
 - Default cert/key paths: `~/.mycelium/coordinator-cert.pem` /
   `coordinator-key.pem`. Override with `--cert-file`/`--key-file`.
+- Per-identity node cap (issue #35): each bound GitHub identity can have
+  at most 3 nodes registered at once by default — override with
+  `--per-identity-cap`. A registration beyond the cap is rejected with a
+  clear reason distinct from an invalid GitHub token; a node
+  disconnecting frees its slot for that identity immediately.
 
 On success you'll see:
 
