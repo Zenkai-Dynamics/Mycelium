@@ -41,10 +41,35 @@ class Node:
     pending: dict[str, asyncio.Future] = field(default_factory=dict)
 
 
+@dataclass
+class ReputationCounters:
+    # Incremented at the exact points router.NodeTimeoutError /
+    # router.NodeError / router.NodeDisconnectedError are already raised
+    # (#10/#11), plus a successful completion. Never reset by
+    # register()/unregister() — see the design doc for issue #36 on why
+    # this must survive a node's disconnect/reconnect cycle to mean
+    # anything (the disconnect counter especially: the connection that
+    # triggers it is the one about to be unregistered).
+    completions: int = 0
+    timeouts: int = 0
+    crashes: int = 0
+    disconnects: int = 0
+
+
 class MissingGithubToken(Exception):
     """Raised by NodeRegistry.resolve_identity when public_key has no
     bound identity yet and no github_token was supplied to establish
     one. See the design doc for issue #39."""
+
+
+def _reputation_dict(counters: ReputationCounters | None) -> dict:
+    counters = counters or ReputationCounters()
+    return {
+        "completions": counters.completions,
+        "timeouts": counters.timeouts,
+        "crashes": counters.crashes,
+        "disconnects": counters.disconnects,
+    }
 
 
 class NodeRegistry:
@@ -68,6 +93,9 @@ class NodeRegistry:
         # not survive a coordinator restart.
         self._identity_by_key: dict[str, github_identity.GithubIdentity] = {}
         self._identity_verifier = identity_verifier or github_identity.verify_identity
+        # public_key -> reputation counters, in-memory only, surviving
+        # independently of _nodes — see the design doc for issue #36.
+        self._reputation: dict[str, ReputationCounters] = {}
 
     def check_token(self, token: Any) -> bool:
         """Constant-time comparison against the configured token. Returns
@@ -121,6 +149,18 @@ class NodeRegistry:
         current = self._nodes.get(public_key)
         if current is not None and current.websocket is websocket:
             del self._nodes[public_key]
+
+    def record_completion(self, public_key: str) -> None:
+        self._reputation.setdefault(public_key, ReputationCounters()).completions += 1
+
+    def record_timeout(self, public_key: str) -> None:
+        self._reputation.setdefault(public_key, ReputationCounters()).timeouts += 1
+
+    def record_crash(self, public_key: str) -> None:
+        self._reputation.setdefault(public_key, ReputationCounters()).crashes += 1
+
+    def record_disconnect(self, public_key: str) -> None:
+        self._reputation.setdefault(public_key, ReputationCounters()).disconnects += 1
 
     def find_node_for_model(
         self, model: str, exclude: frozenset[str] = frozenset()
@@ -184,6 +224,7 @@ class NodeRegistry:
                     if n.public_key in self._identity_by_key
                     else None
                 ),
+                "reputation": _reputation_dict(self._reputation.get(n.public_key)),
             }
             for n in self._nodes.values()
         ]
