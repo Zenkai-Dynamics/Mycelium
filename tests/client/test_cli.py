@@ -9,6 +9,7 @@ import websockets
 
 from mycelium import crypto
 from mycelium.coordinator import certs, server
+from mycelium.coordinator import github_identity
 from mycelium.client.cli import CompletionError, complete, parse_args
 
 
@@ -17,6 +18,10 @@ def _client_ssl_context(cert_path):
     context.check_hostname = False
     context.load_verify_locations(cafile=str(cert_path))
     return context
+
+
+async def _fake_identity_verifier(github_token: str) -> github_identity.GithubIdentity:
+    return github_identity.GithubIdentity(id="1", login="octocat")
 
 
 def test_parse_args_requires_all_flags():
@@ -52,15 +57,18 @@ async def test_complete_returns_text_on_success(tmp_path):
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
         port = coordinator.sockets[0].getsockname()[1]
         client_ctx = _client_ssl_context(cert_path)
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as node_ws:
             private_key = crypto.generate_keypair()
             await node_ws.send(json.dumps({
-                "type": "register", "token": "secret-token", "model": "m", "node_id": "node-a",
+                "type": "register", "model": "m", "node_id": "node-a",
                 "public_key": crypto.public_key_b64(private_key),
                 "signature": crypto.sign_public_key(private_key),
+                "github_token": "valid-github-token",
             }))
             await node_ws.recv()
 

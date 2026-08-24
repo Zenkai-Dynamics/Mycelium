@@ -40,28 +40,26 @@ def test_parse_args_prompt_alone_is_valid():
     assert args.prompt == "hello"
     assert args.coordinator_url is None
     assert args.coordinator_cert is None
-    assert args.token_file is None
+    assert args.github_token_file is None
 
 
-def test_parse_args_coordinator_requires_token_file(tmp_path):
+def test_parse_args_coordinator_alone_is_valid_without_github_token_file(tmp_path):
     cert_path = tmp_path / "cert.pem"
     cert_path.write_text("placeholder")
-    with pytest.raises(SystemExit):
-        parse_args(
-            ["--coordinator-url", "wss://example:8765", "--coordinator-cert", str(cert_path)]
-        )
+    args = parse_args(
+        ["--coordinator-url", "wss://example:8765", "--coordinator-cert", str(cert_path)]
+    )
+    assert args.coordinator_url == "wss://example:8765"
+    assert args.github_token_file is None
 
 
 def test_parse_args_coordinator_alone_is_valid(tmp_path):
     cert_path = tmp_path / "cert.pem"
     cert_path.write_text("placeholder")
-    token_file = tmp_path / "token"
-    token_file.write_text("secret")
     args = parse_args(
         [
             "--coordinator-url", "wss://example:8765",
             "--coordinator-cert", str(cert_path),
-            "--token-file", str(token_file),
         ]
     )
     assert args.coordinator_url == "wss://example:8765"
@@ -102,6 +100,21 @@ def test_parse_args_node_key_file_default():
 def test_parse_args_node_key_file_override():
     args = parse_args(["--prompt", "hi", "--node-key-file", "/tmp/custom-key.pem"])
     assert str(args.node_key_file) == "/tmp/custom-key.pem"
+
+
+def test_parse_args_github_token_file_override(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    cert_path.write_text("placeholder")
+    github_token_file = tmp_path / "github-token"
+    github_token_file.write_text("gh-secret")
+    args = parse_args(
+        [
+            "--coordinator-url", "wss://example:8765",
+            "--coordinator-cert", str(cert_path),
+            "--github-token-file", str(github_token_file),
+        ]
+    )
+    assert str(args.github_token_file) == str(github_token_file)
 
 
 class _FakeVLLMHandler(BaseHTTPRequestHandler):
@@ -178,7 +191,7 @@ def _server_ssl_context(cert_path, key_path):
     return context
 
 
-async def test_run_registers_with_coordinator_using_token_and_node_id(
+async def test_run_registers_with_coordinator_using_github_token_and_node_id(
     tmp_path, monkeypatch, fake_vllm_server
 ):
     vllm_port = fake_vllm_server.server_address[1]
@@ -189,8 +202,8 @@ async def test_run_registers_with_coordinator_using_token_and_node_id(
     cert_path = tmp_path / "cert.pem"
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
-    token_file = tmp_path / "token"
-    token_file.write_text("secret-token\n")
+    github_token_file = tmp_path / "github-token"
+    github_token_file.write_text("gh-secret-token\n")
 
     received = {}
     registered_event = asyncio.Event()
@@ -208,7 +221,7 @@ async def test_run_registers_with_coordinator_using_token_and_node_id(
             [
                 "--coordinator-url", f"wss://127.0.0.1:{coord_port}",
                 "--coordinator-cert", str(cert_path),
-                "--token-file", str(token_file),
+                "--github-token-file", str(github_token_file),
                 "--node-id", "test-node",
                 "--vllm-port", str(vllm_port),
                 "--node-key-file", str(tmp_path / "node-key.pem"),
@@ -226,10 +239,55 @@ async def test_run_registers_with_coordinator_using_token_and_node_id(
     from mycelium import crypto
 
     assert received["type"] == "register"
-    assert received["token"] == "secret-token"
+    assert received["github_token"] == "gh-secret-token"
     assert received["model"] == vllm_process.DEFAULT_MODEL
     assert received["node_id"] == "test-node"
     assert crypto.verify_registration_signature(received["public_key"], received["signature"]) is True
+
+
+async def test_run_omits_github_token_when_no_github_token_file_given(
+    tmp_path, monkeypatch, fake_vllm_server
+):
+    vllm_port = fake_vllm_server.server_address[1]
+    monkeypatch.setattr(
+        vllm_process, "build_command", lambda model, port_: [sys.executable, "-c", "import time; time.sleep(600)"]
+    )
+
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    received = {}
+    registered_event = asyncio.Event()
+
+    async def fake_coordinator(websocket):
+        received.update(json.loads(await websocket.recv()))
+        await websocket.send(json.dumps({"type": "registered"}))
+        registered_event.set()
+        await websocket.wait_closed()
+
+    server_ctx = _server_ssl_context(cert_path, key_path)
+    async with websockets.serve(fake_coordinator, "127.0.0.1", 0, ssl=server_ctx) as coordinator:
+        coord_port = coordinator.sockets[0].getsockname()[1]
+        args = parse_args(
+            [
+                "--coordinator-url", f"wss://127.0.0.1:{coord_port}",
+                "--coordinator-cert", str(cert_path),
+                "--node-id", "test-node",
+                "--vllm-port", str(vllm_port),
+                "--node-key-file", str(tmp_path / "node-key.pem"),
+            ]
+        )
+        process = vllm_process.VLLMProcess(model=args.model, gpu=args.gpu, port=args.vllm_port)
+        run_task = asyncio.create_task(_run(args, process))
+        await asyncio.wait_for(registered_event.wait(), timeout=5.0)
+        run_task.cancel()
+        try:
+            await run_task
+        except asyncio.CancelledError:
+            pass
+
+    assert "github_token" not in received
 
 
 async def test_run_answers_a_routed_complete_request(tmp_path, monkeypatch, fake_vllm_server):
@@ -241,8 +299,8 @@ async def test_run_answers_a_routed_complete_request(tmp_path, monkeypatch, fake
     cert_path = tmp_path / "cert.pem"
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
-    token_file = tmp_path / "token"
-    token_file.write_text("secret-token\n")
+    github_token_file = tmp_path / "github-token"
+    github_token_file.write_text("gh-secret-token\n")
 
     reply_event = asyncio.Event()
     received_reply = {}
@@ -264,7 +322,7 @@ async def test_run_answers_a_routed_complete_request(tmp_path, monkeypatch, fake
             [
                 "--coordinator-url", f"wss://127.0.0.1:{coord_port}",
                 "--coordinator-cert", str(cert_path),
-                "--token-file", str(token_file),
+                "--github-token-file", str(github_token_file),
                 "--node-id", "test-node",
                 "--vllm-port", str(vllm_port),
                 "--node-key-file", str(tmp_path / "node-key.pem"),
@@ -293,8 +351,6 @@ async def test_run_retries_after_registration_rejected(tmp_path, monkeypatch, fa
     cert_path = tmp_path / "cert.pem"
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
-    token_file = tmp_path / "token"
-    token_file.write_text("wrong-token\n")
 
     attempt_count = 0
 
@@ -312,7 +368,6 @@ async def test_run_retries_after_registration_rejected(tmp_path, monkeypatch, fa
             [
                 "--coordinator-url", f"wss://127.0.0.1:{coord_port}",
                 "--coordinator-cert", str(cert_path),
-                "--token-file", str(token_file),
                 "--vllm-port", str(vllm_port),
                 "--node-key-file", str(tmp_path / "node-key.pem"),
             ]
@@ -343,8 +398,6 @@ async def test_registration_backoff_resets_after_a_successful_registration(
     cert_path = tmp_path / "cert.pem"
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
-    token_file = tmp_path / "token"
-    token_file.write_text("secret-token\n")
 
     attempt_times = []
 
@@ -370,7 +423,6 @@ async def test_registration_backoff_resets_after_a_successful_registration(
             [
                 "--coordinator-url", f"wss://127.0.0.1:{coord_port}",
                 "--coordinator-cert", str(cert_path),
-                "--token-file", str(token_file),
                 "--vllm-port", str(vllm_port),
                 "--node-key-file", str(tmp_path / "node-key.pem"),
             ]
@@ -405,21 +457,23 @@ async def test_registration_backoff_resets_after_a_successful_registration(
     )
 
 
-async def test_run_rejects_empty_token_file_before_starting_vllm(tmp_path, monkeypatch, fake_vllm_server):
+async def test_run_rejects_empty_github_token_file_before_starting_vllm(
+    tmp_path, monkeypatch, fake_vllm_server
+):
     vllm_port = fake_vllm_server.server_address[1]
     monkeypatch.setattr(
         vllm_process, "build_command", lambda model, port_: [sys.executable, "-c", "import time; time.sleep(600)"]
     )
     cert_path = tmp_path / "cert.pem"
     cert_path.write_text("placeholder")
-    token_file = tmp_path / "token"
-    token_file.write_text("  \n")
+    github_token_file = tmp_path / "github-token"
+    github_token_file.write_text("  \n")
 
     args = parse_args(
         [
             "--coordinator-url", "wss://127.0.0.1:1",
             "--coordinator-cert", str(cert_path),
-            "--token-file", str(token_file),
+            "--github-token-file", str(github_token_file),
             "--vllm-port", str(vllm_port),
         ]
     )
@@ -428,7 +482,7 @@ async def test_run_rejects_empty_token_file_before_starting_vllm(tmp_path, monke
     with pytest.raises(SystemExit, match="empty"):
         await _run(args, process)
 
-    # vLLM must never have been started — the empty-token check happens
+    # vLLM must never have been started — the empty-file check happens
     # before process.start(), so there's nothing to clean up here and no
     # subprocess was spawned.
 
@@ -464,8 +518,6 @@ def test_sigterm_stops_vllm_process_group_with_no_orphans(tmp_path):
     cert_path = tmp_path / "cert.pem"
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
-    token_file = tmp_path / "token"
-    token_file.write_text("unused-token\n")
 
     env = dict(os.environ)
     env["PATH"] = f"{bin_dir}:{env['PATH']}"
@@ -477,7 +529,6 @@ def test_sigterm_stops_vllm_process_group_with_no_orphans(tmp_path):
             sys.executable, "-m", "mycelium.node.cli",
             "--coordinator-url", "wss://127.0.0.1:1",
             "--coordinator-cert", str(cert_path),
-            "--token-file", str(token_file),
             "--vllm-port", str(vllm_port),
             "--node-key-file", str(tmp_path / "node-key.pem"),
         ],

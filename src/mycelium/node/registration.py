@@ -17,7 +17,13 @@ import json
 
 import websockets
 
-REGISTRATION_TIMEOUT_SECONDS = 10.0
+# Bumped from 10.0 (issue #39): a first-time registration can now
+# involve the coordinator making an outbound GitHub API call, bounded at
+# github_identity.VERIFY_TIMEOUT_SECONDS (5s) — see the design doc for
+# issue #39. Kept equal to server.FIRST_MESSAGE_TIMEOUT_SECONDS by
+# convention (see test_server_and_registration_agree_on_timeout_settings
+# in tests/test_integration.py).
+REGISTRATION_TIMEOUT_SECONDS = 15.0
 
 
 class RegistrationError(Exception):
@@ -37,28 +43,32 @@ class RegistrationTimeout(RegistrationError):
 
 async def register(
     websocket,
-    token: str,
     model: str,
     node_id: str,
     public_key: str,
     signature: str,
+    github_token: str | None = None,
     timeout: float = REGISTRATION_TIMEOUT_SECONDS,
 ) -> None:
     """Send the registration message and wait for the coordinator's
-    response. Returns normally on success. Raises RegistrationRejected if
-    the coordinator rejects the token or signature (or closes the
-    connection before responding), or RegistrationTimeout if no response
-    arrives in time."""
-    await websocket.send(
-        json.dumps({
-            "type": "register",
-            "token": token,
-            "model": model,
-            "node_id": node_id,
-            "public_key": public_key,
-            "signature": signature,
-        })
-    )
+    response. Returns normally on success. github_token is only needed
+    on this public key's first-ever registration — omit it (leave as
+    None) on every later reconnect; the coordinator ignores it once the
+    key is already bound, so it's also harmless to keep passing it. See
+    the design doc for issue #39. Raises RegistrationRejected if the
+    coordinator rejects the registration (or closes the connection
+    before responding), or RegistrationTimeout if no response arrives in
+    time."""
+    message = {
+        "type": "register",
+        "model": model,
+        "node_id": node_id,
+        "public_key": public_key,
+        "signature": signature,
+    }
+    if github_token is not None:
+        message["github_token"] = github_token
+    await websocket.send(json.dumps(message))
     try:
         # asyncio.timeout(), not asyncio.wait_for(): wait_for has a known
         # race on this Python version where a Task.cancel() landing at the

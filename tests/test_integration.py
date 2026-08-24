@@ -15,8 +15,13 @@ import websockets
 from mycelium import crypto
 from mycelium.client.cli import complete as client_complete
 from mycelium.coordinator import certs, server
+from mycelium.coordinator import github_identity
 from mycelium.node import connection, registration, request_handler
 from mycelium.node.vllm_process import VLLMProcess
+
+
+async def _fake_identity_verifier(github_token: str) -> github_identity.GithubIdentity:
+    return github_identity.GithubIdentity(id="1", login="octocat")
 
 
 async def test_node_connects_survives_a_ping_cycle_and_reconnects_after_drop(tmp_path):
@@ -42,8 +47,8 @@ async def test_node_connects_survives_a_ping_cycle_and_reconnects_after_drop(tmp
         ):
             connect_count += 1
             await registration.register(
-                websocket, token="secret-token", model="m", node_id="node-a",
-                public_key=public_key, signature=signature,
+                websocket, model="m", node_id="node-a",
+                public_key=public_key, signature=signature, github_token="valid-github-token",
             )
             try:
                 await websocket.wait_closed()
@@ -52,7 +57,9 @@ async def test_node_connects_survives_a_ping_cycle_and_reconnects_after_drop(tmp
                     return
                 continue
 
-    coordinator1 = await server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token")
+    coordinator1 = await server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    )
     port = coordinator1.sockets[0].getsockname()[1]
     node_task = asyncio.create_task(node_loop(port))
 
@@ -63,7 +70,9 @@ async def test_node_connects_survives_a_ping_cycle_and_reconnects_after_drop(tmp
     await coordinator1.wait_closed()
     await asyncio.sleep(0.5)  # let the node notice the drop
 
-    coordinator2 = await server.serve("127.0.0.1", port, cert_path, key_path, "secret-token")
+    coordinator2 = await server.serve(
+        "127.0.0.1", port, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    )
     await asyncio.sleep(0.5)  # let the node reconnect
 
     stop.set()
@@ -137,14 +146,16 @@ async def test_full_round_trip_client_through_coordinator_to_node_and_back(tmp_p
         public_key = crypto.public_key_b64(private_key)
         signature = crypto.sign_public_key(private_key)
 
-        async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+        async with server.serve(
+            "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+        ) as coordinator:
             port = coordinator.sockets[0].getsockname()[1]
 
             async def node_loop():
                 async for websocket in connection.connect(f"wss://127.0.0.1:{port}", cert_path):
                     await registration.register(
-                        websocket, token="secret-token", model="m", node_id="node-a",
-                        public_key=public_key, signature=signature,
+                        websocket, model="m", node_id="node-a",
+                        public_key=public_key, signature=signature, github_token="valid-github-token",
                     )
                     await request_handler.handle_messages(websocket, process)
 

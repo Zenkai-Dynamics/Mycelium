@@ -402,6 +402,9 @@ Cargo.lock
 # git worktrees for isolated development
 .worktrees/
 
+# subagent-driven-development scratch (ledgers, briefs, review packages)
+.superpowers/
+
 # AI/LLM Agent tool configurations and settings
 .claude/
 .codebuddy/

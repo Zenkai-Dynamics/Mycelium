@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from mycelium import crypto
+from mycelium.coordinator import github_identity
 
 
 @dataclass
@@ -39,10 +41,20 @@ class Node:
     pending: dict[str, asyncio.Future] = field(default_factory=dict)
 
 
+class MissingGithubToken(Exception):
+    """Raised by NodeRegistry.resolve_identity when public_key has no
+    bound identity yet and no github_token was supplied to establish
+    one. See the design doc for issue #39."""
+
+
 class NodeRegistry:
     """Holds the shared token and the current set of registered nodes."""
 
-    def __init__(self, token: str) -> None:
+    def __init__(
+        self,
+        token: str,
+        identity_verifier: Callable[[str], Awaitable[github_identity.GithubIdentity]] | None = None,
+    ) -> None:
         if not token:
             raise ValueError("token must not be empty")
         self._token = token
@@ -51,6 +63,11 @@ class NodeRegistry:
         # selection in find_node_for_model. See the design doc for issue
         # #11 (mechanism) and issue #33 (keyed by public_key, not node_id).
         self._last_returned: dict[str, str] = {}
+        # public_key -> the GithubIdentity bound to it, in-memory only —
+        # see the design doc for issue #39 on why this deliberately does
+        # not survive a coordinator restart.
+        self._identity_by_key: dict[str, github_identity.GithubIdentity] = {}
+        self._identity_verifier = identity_verifier or github_identity.verify_identity
 
     def check_token(self, token: Any) -> bool:
         """Constant-time comparison against the configured token. Returns
@@ -63,6 +80,28 @@ class NodeRegistry:
             return hmac.compare_digest(token, self._token)
         except TypeError:
             return False
+
+    async def resolve_identity(
+        self, public_key: str, github_token: str | None
+    ) -> github_identity.GithubIdentity:
+        """Return the GithubIdentity bound to public_key. If public_key
+        is already bound (an earlier call this coordinator process has
+        seen), returns it immediately and never re-verifies —
+        github_token is ignored entirely in that case, even if supplied.
+        Otherwise github_token is required: raises MissingGithubToken if
+        it's absent/empty, or propagates whatever
+        github_identity.IdentityVerificationError subclass the injected
+        verifier raises if verification fails. See the design doc for
+        issue #39 on why a bound identity is never re-checked: a
+        reconnect must not cost a GitHub API call, by design."""
+        existing = self._identity_by_key.get(public_key)
+        if existing is not None:
+            return existing
+        if not github_token:
+            raise MissingGithubToken("github_token is required for first-time registration")
+        identity = await self._identity_verifier(github_token)
+        self._identity_by_key[public_key] = identity
+        return identity
 
     def register(self, public_key: str, node_id: str, model: str, websocket: Any) -> Node | None:
         """Add or replace public_key's entry. Returns the superseded Node
@@ -140,6 +179,11 @@ class NodeRegistry:
                 "node_id": n.node_id,
                 "model": n.model,
                 "fingerprint": crypto.fingerprint(n.public_key),
+                "identity": (
+                    self._identity_by_key[n.public_key].login
+                    if n.public_key in self._identity_by_key
+                    else None
+                ),
             }
             for n in self._nodes.values()
         ]
