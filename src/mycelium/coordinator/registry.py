@@ -70,6 +70,18 @@ class IdentityCapReached(Exception):
     See the design doc for issue #35."""
 
 
+class UnknownIdentity(Exception):
+    """Raised by NodeRegistry.ban_identity when the operator asks to ban
+    a GitHub login the coordinator has never seen bind to any public key.
+    See the design doc for issue #37."""
+
+
+class IdentityBanned(Exception):
+    """Raised by NodeRegistry.enforce_not_banned when a registration
+    attempt's resolved identity has been banned by the operator. See the
+    design doc for issue #37."""
+
+
 def _reputation_dict(counters: ReputationCounters | None) -> dict:
     counters = counters or ReputationCounters()
     return {
@@ -109,6 +121,13 @@ class NodeRegistry:
         # cap value ("freeze new registrations for every identity"),
         # which `0 or 3` would silently replace with 3.
         self._per_identity_cap = per_identity_cap
+        # GithubIdentity.id values banned by the operator, in-memory only
+        # — see the design doc for issue #37 on why there's no unban
+        # command (a coordinator restart is the only reset path). Keyed
+        # on the stable numeric id, never the login: a login is what the
+        # operator types, but it isn't immutable across GitHub username
+        # renames the way id is.
+        self._banned_identity_ids: set[str] = set()
         # public_key -> reputation counters, in-memory only, surviving
         # independently of _nodes — see the design doc for issue #36.
         self._reputation: dict[str, ReputationCounters] = {}
@@ -153,6 +172,15 @@ class NodeRegistry:
         self._identity_by_key[public_key] = identity
         return identity
 
+    def enforce_not_banned(self, identity: github_identity.GithubIdentity) -> None:
+        """Raise IdentityBanned if identity has been banned by the
+        operator. Unlike enforce_identity_cap, there is NO exemption for
+        a public_key that's already registered — a banned identity's
+        reconnect attempts using an existing key must be rejected too.
+        See the design doc for issue #37."""
+        if identity.id in self._banned_identity_ids:
+            raise IdentityBanned("this identity has been banned by the operator")
+
     def enforce_identity_cap(
         self, public_key: str, identity: github_identity.GithubIdentity
     ) -> None:
@@ -177,6 +205,32 @@ class NodeRegistry:
             raise IdentityCapReached(
                 f"identity has reached the maximum of {self._per_identity_cap} registered nodes"
             )
+
+    def ban_identity(self, login: str) -> list[Node]:
+        """Ban the identity currently bound to GitHub login `login` and
+        return the list of currently-registered Node objects under that
+        identity, so the caller (server.py) can disconnect them. Does NOT
+        unregister them itself — see the design doc for issue #37 on why
+        that's server.py's job, reusing the existing superseded-connection
+        cleanup path rather than duplicating it. Raises UnknownIdentity if
+        the coordinator has never seen `login` bind to any public key.
+        Resolves by scanning currently-known identity bindings rather than
+        keeping a separate login index — bindings are already the sole
+        source of truth for "what identities has this coordinator seen,"
+        and there's no volume concern at this scale."""
+        identity = next(
+            (bound for bound in self._identity_by_key.values() if bound.login == login),
+            None,
+        )
+        if identity is None:
+            raise UnknownIdentity(f"no known identity bound to GitHub login {login!r}")
+        self._banned_identity_ids.add(identity.id)
+        return [
+            node
+            for node in self._nodes.values()
+            if (bound := self._identity_by_key.get(node.public_key)) is not None
+            and bound.id == identity.id
+        ]
 
     def register(self, public_key: str, node_id: str, model: str, websocket: Any) -> Node | None:
         """Add or replace public_key's entry. Returns the superseded Node
