@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+import random
 import pytest
 
 from mycelium.coordinator import github_identity
@@ -54,6 +55,7 @@ def test_register_adds_node_to_list():
             "model": "Qwen/Qwen2.5-7B-Instruct",
             "fingerprint": _expected_fingerprint(b"a" * 32),
             "identity": None,
+            "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0},
         }
     ]
 
@@ -76,6 +78,7 @@ def test_register_replacing_same_public_key_returns_superseded_entry():
             "model": "model-b",
             "fingerprint": _expected_fingerprint(b"a" * 32),
             "identity": None,
+            "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0},
         }
     ]
 
@@ -116,6 +119,7 @@ def test_unregister_does_not_remove_a_newer_replacement():
             "model": "model-b",
             "fingerprint": _expected_fingerprint(b"a" * 32),
             "identity": None,
+            "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0},
         }
     ]
 
@@ -312,6 +316,7 @@ def test_list_nodes_shows_none_identity_when_never_resolved():
             "model": "model-a",
             "fingerprint": _expected_fingerprint(b"a" * 32),
             "identity": None,
+            "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0},
         }
     ]
 
@@ -326,6 +331,7 @@ async def test_list_nodes_shows_login_after_resolve_identity():
             "model": "model-a",
             "fingerprint": _expected_fingerprint(b"a" * 32),
             "identity": "octocat",
+            "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0},
         }
     ]
 
@@ -429,3 +435,120 @@ def test_enforce_identity_cap_zero_blocks_all_new_registrations():
         assert False, "expected IdentityCapReached"
     except IdentityCapReached as exc:
         assert str(exc) == "identity has reached the maximum of 0 registered nodes"
+
+
+def test_record_completion_increments_counter():
+    registry = NodeRegistry("secret")
+    registry.record_completion(PUBKEY_A)
+    registry.record_completion(PUBKEY_A)
+    registry.register(PUBKEY_A, "node-a", "model-a", websocket="ws-a")
+    assert registry.list_nodes()[0]["reputation"] == {
+        "completions": 2, "timeouts": 0, "crashes": 0, "disconnects": 0,
+    }
+
+
+def test_record_timeout_increments_counter():
+    registry = NodeRegistry("secret")
+    registry.record_timeout(PUBKEY_A)
+    registry.register(PUBKEY_A, "node-a", "model-a", websocket="ws-a")
+    assert registry.list_nodes()[0]["reputation"]["timeouts"] == 1
+
+
+def test_record_crash_increments_counter():
+    registry = NodeRegistry("secret")
+    registry.record_crash(PUBKEY_A)
+    registry.register(PUBKEY_A, "node-a", "model-a", websocket="ws-a")
+    assert registry.list_nodes()[0]["reputation"]["crashes"] == 1
+
+
+def test_record_disconnect_increments_counter():
+    registry = NodeRegistry("secret")
+    registry.record_disconnect(PUBKEY_A)
+    registry.register(PUBKEY_A, "node-a", "model-a", websocket="ws-a")
+    assert registry.list_nodes()[0]["reputation"]["disconnects"] == 1
+
+
+def test_reputation_counters_survive_unregister_and_reregister():
+    """The core property this ticket exists for: a disconnect's counter
+    must not be discarded when the connection that triggered it is
+    unregistered — see the design doc for issue #36."""
+    registry = NodeRegistry("secret")
+    registry.register(PUBKEY_A, "node-a", "model-a", websocket="ws-a")
+    registry.record_disconnect(PUBKEY_A)
+    registry.unregister(PUBKEY_A, websocket="ws-a")
+
+    registry.register(PUBKEY_A, "node-a", "model-a", websocket="ws-b")  # reconnect
+    assert registry.list_nodes()[0]["reputation"]["disconnects"] == 1
+
+
+def test_list_nodes_shows_zero_reputation_for_node_with_no_recorded_events():
+    registry = NodeRegistry("secret")
+    registry.register(PUBKEY_A, "node-a", "model-a", websocket="ws-a")
+    assert registry.list_nodes()[0]["reputation"] == {
+        "completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0,
+    }
+
+
+def test_find_node_for_model_with_equal_reputation_is_still_exact_round_robin():
+    """Every candidate has recorded SOME history, but identical amounts —
+    weights tie, so this must still be the deterministic sequence, not a
+    weighted draw. Distinct from the zero-history case the pre-existing
+    round-robin tests already cover."""
+    registry = NodeRegistry("secret")
+    registry.register(PUBKEY_A, "node-a", "model-a", websocket="ws-a")
+    registry.register(PUBKEY_B, "node-b", "model-a", websocket="ws-b")
+    registry.record_completion(PUBKEY_A)
+    registry.record_completion(PUBKEY_B)
+
+    first = registry.find_node_for_model("model-a")
+    second = registry.find_node_for_model("model-a")
+    third = registry.find_node_for_model("model-a")
+    assert [first.public_key, second.public_key, third.public_key] == [
+        PUBKEY_A, PUBKEY_B, PUBKEY_A,
+    ]
+
+
+def test_find_node_for_model_prefers_more_reliable_node_when_weights_differ():
+    registry = NodeRegistry("secret", random_source=random.Random(42))
+    registry.register(PUBKEY_A, "node-a", "model-a", websocket="ws-a")
+    registry.register(PUBKEY_B, "node-b", "model-a", websocket="ws-b")
+    for _ in range(10):
+        registry.record_completion(PUBKEY_A)  # A: perfect record
+    for _ in range(10):
+        registry.record_crash(PUBKEY_B)  # B: all failures
+
+    picks = [registry.find_node_for_model("model-a").public_key for _ in range(200)]
+    a_share = picks.count(PUBKEY_A) / len(picks)
+    assert a_share > 0.7, f"expected A to dominate selection, got {a_share:.2f} share"
+
+
+def test_find_node_for_model_never_fully_excludes_unreliable_node():
+    registry = NodeRegistry("secret", random_source=random.Random(7))
+    registry.register(PUBKEY_A, "node-a", "model-a", websocket="ws-a")
+    registry.register(PUBKEY_B, "node-b", "model-a", websocket="ws-b")
+    for _ in range(50):
+        registry.record_completion(PUBKEY_A)
+    for _ in range(50):
+        registry.record_crash(PUBKEY_B)
+
+    picks = {registry.find_node_for_model("model-a").public_key for _ in range(300)}
+    assert PUBKEY_B in picks, "an unreliable node must still be pickable, never fully excluded"
+
+
+def test_find_node_for_model_weighted_draw_uses_injected_random_source():
+    """Proves the injected random_source is actually consulted, not the
+    global random module — two independently-built registries seeded
+    identically must produce the identical draw sequence."""
+    def build_registry():
+        registry = NodeRegistry("secret", random_source=random.Random(99))
+        registry.register(PUBKEY_A, "node-a", "model-a", websocket="ws-a")
+        registry.register(PUBKEY_B, "node-b", "model-a", websocket="ws-b")
+        registry.record_completion(PUBKEY_A)
+        registry.record_crash(PUBKEY_B)
+        return registry
+
+    registry_1 = build_registry()
+    registry_2 = build_registry()
+    picks_1 = [registry_1.find_node_for_model("model-a").public_key for _ in range(20)]
+    picks_2 = [registry_2.find_node_for_model("model-a").public_key for _ in range(20)]
+    assert picks_1 == picks_2

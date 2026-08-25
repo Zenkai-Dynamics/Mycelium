@@ -231,7 +231,7 @@ mycelium-coordinator-status \
 ```
 
 ```
-your-hostname [a1b2c3d4e5f6] (github:octocat): Qwen/Qwen2.5-7B-Instruct
+your-hostname [a1b2c3d4e5f6] (github:octocat) [ok:12 timeout:1 crash:0 disconnect:2]: Qwen/Qwen2.5-7B-Instruct
 ```
 
 (or `No nodes registered.` if none are currently connected).
@@ -285,8 +285,11 @@ see the `PATH` note in Step 3 above.
 Just repeat Step 3 on each GPU machine (each with its own `--node-id` if
 they'd otherwise share a hostname), all pointed at the same coordinator.
 The coordinator round-robins across every node registered for a given
-model. Killing whichever node a request lands on triggers an automatic,
-immediate failover to another healthy node hosting the same model — no
+model, softly biased toward nodes with better completion records once any
+node in the pool has recorded a failure (see issue #36) — a node with a
+poor record is picked less often, never excluded outright. Killing
+whichever node a request lands on triggers an automatic, immediate
+failover to another healthy node hosting the same model — no
 client-visible failure as long as one remains. Live-verified end to end
 (two real nodes, a real coordinator on a separate host, a real client on
 a fourth machine) — see issue #11's design doc for the full transcript.

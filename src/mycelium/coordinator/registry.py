@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import random
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -41,6 +42,21 @@ class Node:
     pending: dict[str, asyncio.Future] = field(default_factory=dict)
 
 
+@dataclass
+class ReputationCounters:
+    # Incremented at the exact points router.NodeTimeoutError /
+    # router.NodeError / router.NodeDisconnectedError are already raised
+    # (#10/#11), plus a successful completion. Never reset by
+    # register()/unregister() — see the design doc for issue #36 on why
+    # this must survive a node's disconnect/reconnect cycle to mean
+    # anything (the disconnect counter especially: the connection that
+    # triggers it is the one about to be unregistered).
+    completions: int = 0
+    timeouts: int = 0
+    crashes: int = 0
+    disconnects: int = 0
+
+
 class MissingGithubToken(Exception):
     """Raised by NodeRegistry.resolve_identity when public_key has no
     bound identity yet and no github_token was supplied to establish
@@ -54,6 +70,16 @@ class IdentityCapReached(Exception):
     See the design doc for issue #35."""
 
 
+def _reputation_dict(counters: ReputationCounters | None) -> dict:
+    counters = counters or ReputationCounters()
+    return {
+        "completions": counters.completions,
+        "timeouts": counters.timeouts,
+        "crashes": counters.crashes,
+        "disconnects": counters.disconnects,
+    }
+
+
 class NodeRegistry:
     """Holds the shared token and the current set of registered nodes."""
 
@@ -62,6 +88,7 @@ class NodeRegistry:
         token: str,
         identity_verifier: Callable[[str], Awaitable[github_identity.GithubIdentity]] | None = None,
         per_identity_cap: int = 3,
+        random_source: random.Random | None = None,
     ) -> None:
         if not token:
             raise ValueError("token must not be empty")
@@ -82,6 +109,15 @@ class NodeRegistry:
         # cap value ("freeze new registrations for every identity"),
         # which `0 or 3` would silently replace with 3.
         self._per_identity_cap = per_identity_cap
+        # public_key -> reputation counters, in-memory only, surviving
+        # independently of _nodes — see the design doc for issue #36.
+        self._reputation: dict[str, ReputationCounters] = {}
+        # A private instance, never the random module's shared global
+        # functions — see the design doc for issue #36 on why (nothing
+        # else in the process can perturb this registry's weighted draws
+        # by calling random.seed() elsewhere). Tests inject
+        # random.Random(<fixed seed>) for reproducible draws.
+        self._random = random_source or random.Random()
 
     def check_token(self, token: Any) -> bool:
         """Constant-time comparison against the configured token. Returns
@@ -161,19 +197,54 @@ class NodeRegistry:
         if current is not None and current.websocket is websocket:
             del self._nodes[public_key]
 
+    def record_completion(self, public_key: str) -> None:
+        self._reputation.setdefault(public_key, ReputationCounters()).completions += 1
+
+    def record_timeout(self, public_key: str) -> None:
+        self._reputation.setdefault(public_key, ReputationCounters()).timeouts += 1
+
+    def record_crash(self, public_key: str) -> None:
+        self._reputation.setdefault(public_key, ReputationCounters()).crashes += 1
+
+    def record_disconnect(self, public_key: str) -> None:
+        self._reputation.setdefault(public_key, ReputationCounters()).disconnects += 1
+
+    def _reputation_weight(self, public_key: str) -> float:
+        """Laplace-smoothed success rate for public_key — 1.0 for a node
+        with no recorded history (never penalizes the unproven), never
+        exactly 0 no matter how many failures accumulate. See the design
+        doc for issue #36."""
+        counters = self._reputation.get(public_key)
+        if counters is None:
+            return 1.0
+        total = counters.completions + counters.timeouts + counters.crashes + counters.disconnects
+        return (counters.completions + 1) / (total + 1)
+
     def find_node_for_model(
         self, model: str, exclude: frozenset[str] = frozenset()
     ) -> Node | None:
-        """Return the next registered node hosting `model`, round-robin
-        across current candidates (skipping any public_key in `exclude`),
-        or None if none match — see the design doc for issue #11.
+        """Return a registered node hosting `model`, weighted by recent
+        reliability, or None if none match — see the design doc for
+        issue #11 (the original round-robin mechanism) and issue #36
+        (the weighting pass added on top of it).
 
         Rotation state is the public_key this returned last time for
-        `model`; the next call returns the candidate after it, wrapping
-        around. If that node has since left the registry (or is itself
-        excluded), rotation restarts from the front of the current
-        candidate list — no fairness guarantee across registry churn,
-        only "don't always pick the same node when several are healthy."
+        `model`; if every current candidate has an identical reputation
+        weight (true whenever none of them have recorded history yet —
+        every case the original round-robin behavior was built and
+        tested against), the next call returns the candidate after that
+        one, wrapping around, exactly as before. If that node has since
+        left the registry (or is itself excluded), rotation restarts
+        from the front of the current candidate list — no fairness
+        guarantee across registry churn, only "don't always pick the
+        same node when several are equally healthy."
+
+        When weights genuinely differ, a weighted-random draw (via the
+        injected random_source) replaces that deterministic step — still
+        capable of picking a less-reliable node, just less often. Either
+        way, `_last_returned` is updated to whichever node was actually
+        picked, so the rotation continues meaningfully from wherever a
+        weighted draw landed.
 
         `exclude` lets a caller retry with a different node within one
         client request (see server.py's failover loop) without disturbing
@@ -187,14 +258,19 @@ class NodeRegistry:
         if not candidates:
             return None
 
-        start = 0
-        last = self._last_returned.get(model)
-        if last is not None:
-            keys = [node.public_key for node in candidates]
-            if last in keys:
-                start = (keys.index(last) + 1) % len(candidates)
+        weights = [self._reputation_weight(node.public_key) for node in candidates]
 
-        node = candidates[start]
+        if len(set(weights)) == 1:
+            start = 0
+            last = self._last_returned.get(model)
+            if last is not None:
+                keys = [node.public_key for node in candidates]
+                if last in keys:
+                    start = (keys.index(last) + 1) % len(candidates)
+            node = candidates[start]
+        else:
+            node = self._random.choices(candidates, weights=weights, k=1)[0]
+
         if not exclude:
             self._last_returned[model] = node.public_key
         return node
@@ -223,6 +299,7 @@ class NodeRegistry:
                     if n.public_key in self._identity_by_key
                     else None
                 ),
+                "reputation": _reputation_dict(self._reputation.get(n.public_key)),
             }
             for n in self._nodes.values()
         ]
