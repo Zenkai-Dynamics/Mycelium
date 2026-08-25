@@ -534,6 +534,105 @@ async def test_registration_reconnect_with_known_key_needs_no_github_token(tmp_p
             response = json.loads(await second_ws.recv())
             assert response == {"type": "registered"}
 
+async def test_registration_rejected_when_identity_cap_reached(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token",
+        identity_verifier=_fake_identity_verifier, per_identity_cap=1,
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as first_ws:
+            payload, _ = _register_payload("node-a", "m")
+            await first_ws.send(json.dumps(payload))
+            response = json.loads(await first_ws.recv())
+            assert response == {"type": "registered"}
+
+            async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as second_ws:
+                # A DIFFERENT key, same fake identity ("octocat") — the
+                # cap of 1 is already occupied by the first connection.
+                payload, _ = _register_payload("node-b", "m")
+                await second_ws.send(json.dumps(payload))
+                response = json.loads(await second_ws.recv())
+                assert response == {
+                    "type": "registration_rejected",
+                    "reason": "identity has reached the maximum of 1 registered nodes",
+                }
+                with pytest.raises(websockets.exceptions.ConnectionClosed):
+                    await second_ws.recv()
+
+
+async def test_registration_succeeds_after_identity_cap_slot_freed_by_disconnect(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token",
+        identity_verifier=_fake_identity_verifier, per_identity_cap=1,
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+
+        first_ws = await websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx)
+        payload, _ = _register_payload("node-a", "m")
+        await first_ws.send(json.dumps(payload))
+        await first_ws.recv()
+
+        await first_ws.close()
+        await asyncio.sleep(0.2)  # let the coordinator notice the disconnect
+
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as second_ws:
+            payload, _ = _register_payload("node-b", "m")
+            await second_ws.send(json.dumps(payload))
+            response = json.loads(await second_ws.recv())
+            assert response == {"type": "registered"}
+
+
+async def test_registration_reconnect_of_existing_key_not_blocked_by_identity_cap(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token",
+        identity_verifier=_fake_identity_verifier, per_identity_cap=1,
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+
+        private_key = crypto.generate_keypair()
+        public_key = crypto.public_key_b64(private_key)
+        signature = crypto.sign_public_key(private_key)
+
+        old_ws = await websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx)
+        await old_ws.send(json.dumps({
+            "type": "register", "model": "m", "node_id": "node-a",
+            "public_key": public_key, "signature": signature,
+            "github_token": "valid-github-token",
+        }))
+        await old_ws.recv()
+
+        # Register AGAIN under the SAME key while old_ws is still open and
+        # still occupying the (only) cap slot — the cap must not block
+        # this, since it's the same key re-registering (a reconnect), not
+        # a new one. If the exemption were broken, this would be rejected
+        # with "identity has reached the maximum of 1 registered nodes"
+        # instead of succeeding.
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as new_ws:
+            await new_ws.send(json.dumps({
+                "type": "register", "model": "m", "node_id": "node-a",
+                "public_key": public_key, "signature": signature,
+            }))
+            response = json.loads(await new_ws.recv())
+            assert response == {"type": "registered"}
+
+        await old_ws.close()
+
 
 async def test_duplicate_node_id_registration_acks_promptly_even_if_old_connection_is_unresponsive(tmp_path):
     cert_path = tmp_path / "cert.pem"

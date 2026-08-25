@@ -63,6 +63,13 @@ class MissingGithubToken(Exception):
     one. See the design doc for issue #39."""
 
 
+class IdentityCapReached(Exception):
+    """Raised by NodeRegistry.enforce_identity_cap when registering
+    public_key as a NEW slot would push its identity's currently-
+    registered node count to or past the configured per-identity cap.
+    See the design doc for issue #35."""
+
+
 def _reputation_dict(counters: ReputationCounters | None) -> dict:
     counters = counters or ReputationCounters()
     return {
@@ -80,6 +87,7 @@ class NodeRegistry:
         self,
         token: str,
         identity_verifier: Callable[[str], Awaitable[github_identity.GithubIdentity]] | None = None,
+        per_identity_cap: int = 3,
         random_source: random.Random | None = None,
     ) -> None:
         if not token:
@@ -95,6 +103,12 @@ class NodeRegistry:
         # not survive a coordinator restart.
         self._identity_by_key: dict[str, github_identity.GithubIdentity] = {}
         self._identity_verifier = identity_verifier or github_identity.verify_identity
+        # Sybil-resistance cap — see the design doc for issue #35. A
+        # literal default (not the None-sentinel-with-`or` pattern
+        # identity_verifier uses above): 0 is a legitimate, meaningful
+        # cap value ("freeze new registrations for every identity"),
+        # which `0 or 3` would silently replace with 3.
+        self._per_identity_cap = per_identity_cap
         # public_key -> reputation counters, in-memory only, surviving
         # independently of _nodes — see the design doc for issue #36.
         self._reputation: dict[str, ReputationCounters] = {}
@@ -138,6 +152,31 @@ class NodeRegistry:
         identity = await self._identity_verifier(github_token)
         self._identity_by_key[public_key] = identity
         return identity
+
+    def enforce_identity_cap(
+        self, public_key: str, identity: github_identity.GithubIdentity
+    ) -> None:
+        """Raise IdentityCapReached if registering public_key as a NEW
+        slot would push identity's currently-registered node count to or
+        past the configured cap. A public_key already present in _nodes
+        is exempt — it's a reconnect/replace of an existing slot (handled
+        by register()'s own supersede semantics), not a new one, so it
+        must never be blocked here. Counts live registry occupancy (via
+        _identity_by_key), not identity binding history — a disconnected
+        node's old key doesn't count against the cap. See the design doc
+        for issue #35."""
+        if public_key in self._nodes:
+            return
+        current_count = sum(
+            1
+            for node in self._nodes.values()
+            if (bound := self._identity_by_key.get(node.public_key)) is not None
+            and bound.id == identity.id
+        )
+        if current_count >= self._per_identity_cap:
+            raise IdentityCapReached(
+                f"identity has reached the maximum of {self._per_identity_cap} registered nodes"
+            )
 
     def register(self, public_key: str, node_id: str, model: str, websocket: Any) -> Node | None:
         """Add or replace public_key's entry. Returns the superseded Node
