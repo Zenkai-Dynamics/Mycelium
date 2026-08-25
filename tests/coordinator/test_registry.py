@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+import random
 import pytest
 
 from mycelium.coordinator import github_identity
@@ -392,3 +393,68 @@ def test_list_nodes_shows_zero_reputation_for_node_with_no_recorded_events():
     assert registry.list_nodes()[0]["reputation"] == {
         "completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0,
     }
+
+
+def test_find_node_for_model_with_equal_reputation_is_still_exact_round_robin():
+    """Every candidate has recorded SOME history, but identical amounts —
+    weights tie, so this must still be the deterministic sequence, not a
+    weighted draw. Distinct from the zero-history case the pre-existing
+    round-robin tests already cover."""
+    registry = NodeRegistry("secret")
+    registry.register(PUBKEY_A, "node-a", "model-a", websocket="ws-a")
+    registry.register(PUBKEY_B, "node-b", "model-a", websocket="ws-b")
+    registry.record_completion(PUBKEY_A)
+    registry.record_completion(PUBKEY_B)
+
+    first = registry.find_node_for_model("model-a")
+    second = registry.find_node_for_model("model-a")
+    third = registry.find_node_for_model("model-a")
+    assert [first.public_key, second.public_key, third.public_key] == [
+        PUBKEY_A, PUBKEY_B, PUBKEY_A,
+    ]
+
+
+def test_find_node_for_model_prefers_more_reliable_node_when_weights_differ():
+    registry = NodeRegistry("secret", random_source=random.Random(42))
+    registry.register(PUBKEY_A, "node-a", "model-a", websocket="ws-a")
+    registry.register(PUBKEY_B, "node-b", "model-a", websocket="ws-b")
+    for _ in range(10):
+        registry.record_completion(PUBKEY_A)  # A: perfect record
+    for _ in range(10):
+        registry.record_crash(PUBKEY_B)  # B: all failures
+
+    picks = [registry.find_node_for_model("model-a").public_key for _ in range(200)]
+    a_share = picks.count(PUBKEY_A) / len(picks)
+    assert a_share > 0.7, f"expected A to dominate selection, got {a_share:.2f} share"
+
+
+def test_find_node_for_model_never_fully_excludes_unreliable_node():
+    registry = NodeRegistry("secret", random_source=random.Random(7))
+    registry.register(PUBKEY_A, "node-a", "model-a", websocket="ws-a")
+    registry.register(PUBKEY_B, "node-b", "model-a", websocket="ws-b")
+    for _ in range(50):
+        registry.record_completion(PUBKEY_A)
+    for _ in range(50):
+        registry.record_crash(PUBKEY_B)
+
+    picks = {registry.find_node_for_model("model-a").public_key for _ in range(300)}
+    assert PUBKEY_B in picks, "an unreliable node must still be pickable, never fully excluded"
+
+
+def test_find_node_for_model_weighted_draw_uses_injected_random_source():
+    """Proves the injected random_source is actually consulted, not the
+    global random module — two independently-built registries seeded
+    identically must produce the identical draw sequence."""
+    def build_registry():
+        registry = NodeRegistry("secret", random_source=random.Random(99))
+        registry.register(PUBKEY_A, "node-a", "model-a", websocket="ws-a")
+        registry.register(PUBKEY_B, "node-b", "model-a", websocket="ws-b")
+        registry.record_completion(PUBKEY_A)
+        registry.record_crash(PUBKEY_B)
+        return registry
+
+    registry_1 = build_registry()
+    registry_2 = build_registry()
+    picks_1 = [registry_1.find_node_for_model("model-a").public_key for _ in range(20)]
+    picks_2 = [registry_2.find_node_for_model("model-a").public_key for _ in range(20)]
+    assert picks_1 == picks_2
