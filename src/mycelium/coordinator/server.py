@@ -111,7 +111,9 @@ async def _handle_complete_request(websocket, registry: NodeRegistry, message: d
     registry and retry a different healthy node before giving up — see
     the design doc for issue #11. A timeout or a node-reported failure is
     not retried: the node might still be working, and silently re-running
-    the same prompt on a second node risks double-executing it."""
+    the same prompt on a second node risks double-executing it. Each
+    outcome (completion/timeout/crash/disconnect) is recorded against the
+    node that produced it — see the design doc for issue #36."""
     if not registry.check_token(message.get("token")):
         await websocket.close()
         return
@@ -127,6 +129,13 @@ async def _handle_complete_request(websocket, registry: NodeRegistry, message: d
             return
         await websocket.close()
         return
+
+    async def reject(reason: str) -> None:
+        try:
+            await websocket.send(json.dumps({"type": "complete_error", "reason": reason}))
+        except websockets.exceptions.ConnectionClosed:
+            return
+        await websocket.close()
 
     tried: set[str] = set()
     while True:
@@ -148,17 +157,23 @@ async def _handle_complete_request(websocket, registry: NodeRegistry, message: d
             # The picked node is actually dead — self-heal the registry
             # right away (don't wait for #9's ping/pong timeout) and try a
             # different healthy node instead of failing the request.
+            registry.record_disconnect(node.public_key)
             registry.unregister(node.public_key, node.websocket)
             tried.add(node.public_key)
             continue
+        except router.NodeTimeoutError as exc:
+            registry.record_timeout(node.public_key)
+            await reject(str(exc))
+            return
+        except router.NodeError as exc:
+            registry.record_crash(node.public_key)
+            await reject(str(exc))
+            return
         except router.RoutingError as exc:
-            try:
-                await websocket.send(json.dumps({"type": "complete_error", "reason": str(exc)}))
-            except websockets.exceptions.ConnectionClosed:
-                return
-            await websocket.close()
+            await reject(str(exc))
             return
         else:
+            registry.record_completion(node.public_key)
             break
 
     try:
