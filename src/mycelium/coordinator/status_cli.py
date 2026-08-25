@@ -72,7 +72,12 @@ def main() -> None:
         return
     for node in nodes:
         identity = f" (github:{node['identity']})" if node.get("identity") else ""
-        print(f"{node['node_id']} [{node['fingerprint']}]{identity}: {node['model']}")
+        rep = node["reputation"]
+        reputation = (
+            f" [ok:{rep['completions']} timeout:{rep['timeouts']} "
+            f"crash:{rep['crashes']} disconnect:{rep['disconnects']}]"
+        )
+        print(f"{node['node_id']} [{node['fingerprint']}]{identity}{reputation}: {node['model']}")
 
 
 if __name__ == "__main__":

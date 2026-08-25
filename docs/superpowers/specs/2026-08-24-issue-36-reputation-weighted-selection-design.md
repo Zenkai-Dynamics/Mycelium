@@ -1,7 +1,7 @@
 # Issue #36 — Reputation-Weighted Node Selection — Design
 
 Date: 2026-08-24
-Status: Approved, not yet implemented
+Status: Implemented
 Issue: [#36 — Reputation-weighted node selection](https://github.com/Zenkai-Dynamics/Mycelium/issues/36)
 Parent: [#31 — Phase 1: Open node pool to public volunteers](https://github.com/Zenkai-Dynamics/Mycelium/issues/31) —
 see [the Phase 1 design doc](2026-08-23-phase-1-open-network-design.md) for

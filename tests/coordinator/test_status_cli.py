@@ -87,6 +87,7 @@ async def test_query_status_returns_registered_node(tmp_path):
             "model": "Qwen/Qwen2.5-7B-Instruct",
             "fingerprint": crypto.fingerprint(public_key),
             "identity": "octocat",
+            "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0},
         }
     ]
 
@@ -109,6 +110,7 @@ def test_main_prints_bound_github_identity(tmp_path, monkeypatch, capsys):
                 "model": "Qwen/Qwen2.5-7B-Instruct",
                 "fingerprint": "a1b2c3d4e5f6",
                 "identity": "octocat",
+                "reputation": {"completions": 12, "timeouts": 1, "crashes": 0, "disconnects": 2},
             }
         ]
 
@@ -127,7 +129,10 @@ def test_main_prints_bound_github_identity(tmp_path, monkeypatch, capsys):
     status_cli.main()
 
     out = capsys.readouterr().out
-    assert out == "node-a [a1b2c3d4e5f6] (github:octocat): Qwen/Qwen2.5-7B-Instruct\n"
+    assert out == (
+        "node-a [a1b2c3d4e5f6] (github:octocat) [ok:12 timeout:1 crash:0 disconnect:2]: "
+        "Qwen/Qwen2.5-7B-Instruct\n"
+    )
 
 
 def test_main_omits_identity_suffix_when_node_has_none(tmp_path, monkeypatch, capsys):
@@ -146,6 +151,7 @@ def test_main_omits_identity_suffix_when_node_has_none(tmp_path, monkeypatch, ca
                 "model": "m",
                 "fingerprint": "a1b2c3d4e5f6",
                 "identity": None,
+                "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0},
             }
         ]
 
@@ -164,7 +170,7 @@ def test_main_omits_identity_suffix_when_node_has_none(tmp_path, monkeypatch, ca
     status_cli.main()
 
     out = capsys.readouterr().out
-    assert out == "node-a [a1b2c3d4e5f6]: m\n"
+    assert out == "node-a [a1b2c3d4e5f6] [ok:0 timeout:0 crash:0 disconnect:0]: m\n"
 
 
 async def test_query_status_raises_on_wrong_token(tmp_path):
