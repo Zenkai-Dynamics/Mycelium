@@ -1433,3 +1433,151 @@ async def test_complete_request_returns_error_when_every_node_is_dead():
     response = json.loads(client_ws.sent[0])
     assert response["type"] == "complete_error"
     assert registry.list_nodes() == []
+
+
+async def test_registration_rejected_when_identity_is_banned(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as first_ws:
+            payload, _ = _register_payload("node-a", "m")
+            await first_ws.send(json.dumps(payload))
+            response = json.loads(await first_ws.recv())
+            assert response == {"type": "registered"}
+
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ban_ws:
+            await ban_ws.send(json.dumps(
+                {"type": "ban_identity", "token": "secret-token", "identity": "octocat"}
+            ))
+            await ban_ws.recv()
+
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as second_ws:
+            payload, _ = _register_payload("node-b", "m")
+            await second_ws.send(json.dumps(payload))
+            response = json.loads(await second_ws.recv())
+            assert response == {
+                "type": "registration_rejected",
+                "reason": "this identity has been banned by the operator",
+            }
+            with pytest.raises(websockets.exceptions.ConnectionClosed):
+                await second_ws.recv()
+
+
+async def test_ban_disconnects_currently_registered_node(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+
+        node_ws = await websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx)
+        payload, _ = _register_payload("node-a", "m")
+        await node_ws.send(json.dumps(payload))
+        await node_ws.recv()
+
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ban_ws:
+            await ban_ws.send(json.dumps(
+                {"type": "ban_identity", "token": "secret-token", "identity": "octocat"}
+            ))
+            response = json.loads(await ban_ws.recv())
+            assert response == {
+                "type": "banned", "identity": "octocat", "disconnected_count": 1,
+            }
+
+        with pytest.raises(websockets.exceptions.ConnectionClosed):
+            await node_ws.recv()
+
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as status_ws:
+            await status_ws.send(json.dumps({"type": "status_query", "token": "secret-token"}))
+            response = json.loads(await status_ws.recv())
+            assert response["nodes"] == []
+
+
+async def test_ban_request_with_wrong_token_is_closed_without_reply(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws:
+            await ws.send(json.dumps(
+                {"type": "ban_identity", "token": "wrong", "identity": "octocat"}
+            ))
+            with pytest.raises(websockets.exceptions.ConnectionClosed):
+                await ws.recv()
+
+
+async def test_ban_request_for_unknown_identity_returns_ban_failed(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws:
+            await ws.send(json.dumps(
+                {"type": "ban_identity", "token": "secret-token", "identity": "nobody"}
+            ))
+            response = json.loads(await ws.recv())
+            assert response == {
+                "type": "ban_failed",
+                "reason": "no known identity bound to GitHub login 'nobody'",
+            }
+            with pytest.raises(websockets.exceptions.ConnectionClosed):
+                await ws.recv()
+
+
+async def test_ban_is_checked_before_identity_cap(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token",
+        identity_verifier=_fake_identity_verifier, per_identity_cap=1,
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as first_ws:
+            payload, _ = _register_payload("node-a", "m")
+            await first_ws.send(json.dumps(payload))
+            await first_ws.recv()
+
+            async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ban_ws:
+                await ban_ws.send(json.dumps(
+                    {"type": "ban_identity", "token": "secret-token", "identity": "octocat"}
+                ))
+                await ban_ws.recv()
+
+            # first_ws is still open here, so the identity is simultaneously
+            # AT its cap of 1 and banned — a NEW key for that same identity
+            # must see the ban rejection, not the cap rejection. If ban
+            # weren't checked first, this would instead see
+            # "identity has reached the maximum of 1 registered nodes".
+            async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as second_ws:
+                payload, _ = _register_payload("node-b", "m")
+                await second_ws.send(json.dumps(payload))
+                response = json.loads(await second_ws.recv())
+                assert response == {
+                    "type": "registration_rejected",
+                    "reason": "this identity has been banned by the operator",
+                }

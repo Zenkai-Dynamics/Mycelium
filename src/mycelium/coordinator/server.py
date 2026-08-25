@@ -24,7 +24,14 @@ import websockets
 
 from mycelium import crypto
 from mycelium.coordinator import github_identity, router
-from mycelium.coordinator.registry import IdentityCapReached, MissingGithubToken, Node, NodeRegistry
+from mycelium.coordinator.registry import (
+    IdentityBanned,
+    IdentityCapReached,
+    MissingGithubToken,
+    Node,
+    NodeRegistry,
+    UnknownIdentity,
+)
 
 # These three also double as #9's node-liveness mechanism: a silent node
 # (no pong within PING_TIMEOUT_SECONDS of a ping) has the library start a
@@ -94,6 +101,10 @@ async def _handle_node(websocket, registry: NodeRegistry) -> None:
 
     if message_type == "register":
         await _handle_registration(websocket, registry, message)
+        return
+
+    if message_type == "ban_identity":
+        await _handle_ban_request(websocket, registry, message)
         return
 
     if message_type == "complete":
@@ -212,6 +223,44 @@ async def _handle_status_query(websocket, registry: NodeRegistry, message: dict)
     await websocket.close()
 
 
+async def _handle_ban_request(websocket, registry: NodeRegistry, message: dict) -> None:
+    """An operator's `mycelium-coordinator-ban` command: authenticate,
+    ban the named GitHub login, then disconnect any currently-registered
+    nodes under that identity — see the design doc for issue #37.
+    Disconnecting reuses the same _close_in_background(...) path
+    _handle_registration already uses for a superseded connection; each
+    disconnected node's own long-lived handler (this same function,
+    running for that node's original connection) notices
+    ConnectionClosed and runs its existing finally-block cleanup
+    (registry.unregister + failing any pending routed requests)."""
+    if not registry.check_token(message.get("token")):
+        await websocket.close()
+        return
+
+    identity = message.get("identity")
+    if not identity:
+        await websocket.send(json.dumps(
+            {"type": "ban_failed", "reason": "identity is required"}
+        ))
+        await websocket.close()
+        return
+
+    try:
+        disconnected_nodes = registry.ban_identity(identity)
+    except UnknownIdentity as exc:
+        await websocket.send(json.dumps({"type": "ban_failed", "reason": str(exc)}))
+        await websocket.close()
+        return
+
+    for node in disconnected_nodes:
+        _close_in_background(node.websocket)
+
+    await websocket.send(json.dumps({
+        "type": "banned", "identity": identity, "disconnected_count": len(disconnected_nodes),
+    }))
+    await websocket.close()
+
+
 async def _handle_registration(websocket, registry: NodeRegistry, message: dict) -> None:
     node_id = message.get("node_id")
     model = message.get("model")
@@ -264,6 +313,16 @@ async def _handle_registration(websocket, registry: NodeRegistry, message: dict)
         await websocket.send(json.dumps({
             "type": "registration_rejected",
             "reason": "could not reach GitHub to verify identity, try again",
+        }))
+        await websocket.close()
+        return
+
+    try:
+        registry.enforce_not_banned(identity)
+    except IdentityBanned as exc:
+        await websocket.send(json.dumps({
+            "type": "registration_rejected",
+            "reason": str(exc),
         }))
         await websocket.close()
         return
