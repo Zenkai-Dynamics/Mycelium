@@ -229,7 +229,7 @@ async def _handle_ban_request(websocket, registry: NodeRegistry, message: dict) 
     nodes under that identity — see the design doc for issue #37.
     Disconnecting reuses the same _close_in_background(...) path
     _handle_registration already uses for a superseded connection; each
-    disconnected node's own long-lived handler (this same function,
+    disconnected node's own long-lived _handle_registration task (still
     running for that node's original connection) notices
     ConnectionClosed and runs its existing finally-block cleanup
     (registry.unregister + failing any pending routed requests)."""
