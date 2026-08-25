@@ -1,5 +1,6 @@
 """Tests for mycelium.coordinator.ban_cli."""
 
+import json
 import ssl
 import sys
 
@@ -85,6 +86,25 @@ async def test_ban_identity_raises_on_unknown_identity(tmp_path):
         port = coordinator.sockets[0].getsockname()[1]
         with pytest.raises(BanError, match="no known identity"):
             await ban_identity(f"wss://127.0.0.1:{port}", cert_path, "secret-token", "nobody")
+
+
+async def test_ban_identity_raises_on_unexpected_reply_type(tmp_path):
+    """A reply that's neither "banned" nor "ban_failed" must not be
+    silently treated as a successful ban with 0 disconnects — see
+    Finding 4 of the final whole-branch review for issue #37."""
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+    ssl_context = server.build_ssl_context(cert_path, key_path)
+
+    async def handler(websocket):
+        await websocket.recv()
+        await websocket.send(json.dumps({"type": "something_else"}))
+
+    async with websockets.serve(handler, "127.0.0.1", 0, ssl=ssl_context) as fake_coordinator:
+        port = fake_coordinator.sockets[0].getsockname()[1]
+        with pytest.raises(BanError, match="unexpected reply"):
+            await ban_identity(f"wss://127.0.0.1:{port}", cert_path, "secret-token", "octocat")
 
 
 async def test_ban_identity_raises_on_wrong_token(tmp_path):

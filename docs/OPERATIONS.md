@@ -6,7 +6,8 @@ This walks through actually **running** Mycelium end to end: standing up
 a coordinator, connecting a node to it, and sending a completion through
 as a client. It assumes you've already followed
 [SETUP.md](SETUP.md) to get `mycelium-coordinator`, `mycelium-node`,
-`mycelium-coordinator-status`, and `mycelium-client` installed.
+`mycelium-coordinator-status`, `mycelium-coordinator-ban`, and
+`mycelium-client` installed.
 
 If you just want to confirm a GPU node's vLLM stack works at all,
 without any coordinator involved, skip to
@@ -61,7 +62,8 @@ chmod 600 ~/.mycelium/token
 
 Copy this same file (or its contents) to every client machine —
 `scp ~/.mycelium/token <client-host>:~/.mycelium/token`, etc. Anyone who
-has it can submit completions, so treat it like a password.
+has it can submit completions **and ban any node's identity** (see
+Step 6), so treat it like a password.
 
 ## Step 2 — Start the coordinator
 

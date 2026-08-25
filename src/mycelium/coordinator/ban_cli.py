@@ -67,6 +67,14 @@ async def ban_identity(
         message = json.loads(raw)
         if message.get("type") == "ban_failed":
             raise BanError(message.get("reason", "ban failed"))
+        if message.get("type") != "banned":
+            # Guards against silently reporting success on some other,
+            # unanticipated reply — see Finding 4 of the final
+            # whole-branch review for issue #37: without this, an
+            # unexpected message would fall through to
+            # disconnected_count's default of 0, indistinguishable from
+            # a legitimate zero-node ban.
+            raise BanError(f"unexpected reply from coordinator: {message!r}")
         return message.get("disconnected_count", 0)
 
 
