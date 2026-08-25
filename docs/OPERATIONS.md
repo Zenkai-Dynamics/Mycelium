@@ -263,6 +263,36 @@ disconnected, the coordinator silently retries a different healthy node
 before giving up — you'll never see that as a client-visible error as
 long as another healthy node for the same model exists.
 
+## Step 6 — Ban a misbehaving identity (operator override)
+
+If a volunteer's node needs to be removed for cause — e.g. a report of
+bad-faith output that never tripped a timeout or crash counter — revoke
+their bound GitHub identity outright:
+
+```bash
+mycelium-coordinator-ban \
+  --coordinator-url wss://<coordinator-ip>:8765 \
+  --coordinator-cert ~/.mycelium/coordinator-cert.pem \
+  --token-file ~/.mycelium/token \
+  --identity <github-login>
+```
+
+Use the login shown by `mycelium-coordinator-status`'s `(github:<login>)`
+suffix. On success:
+
+```
+banned 'octocat' — disconnected 1 currently-registered node(s)
+```
+
+Every currently-registered node under that identity is disconnected
+immediately, and every future registration attempt from it is rejected
+with `this identity has been banned by the operator` — reconnects using
+an already-registered key included. There's no unban command: ban state
+is in-memory only, like every other piece of coordinator state, so a
+coordinator restart is the only way to reverse a ban. Banning a GitHub
+login the coordinator has never seen bind to any node fails instead:
+`error: no known identity bound to GitHub login '<login>'`.
+
 ## Troubleshooting
 
 **`ValueError: Free memory on device cuda:<N> (X/Y GiB) on startup is
