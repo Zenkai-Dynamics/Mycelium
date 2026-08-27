@@ -1,0 +1,178 @@
+"""Tests for mycelium.coordinator.ban_cli."""
+
+import json
+import ssl
+import sys
+
+import pytest
+import websockets
+
+from mycelium import crypto
+from mycelium.coordinator import ban_cli, certs, server
+from mycelium.coordinator import github_identity
+from mycelium.coordinator.ban_cli import BanError, ban_identity, parse_args
+from mycelium.node import registration
+
+
+def _client_ssl_context(cert_path):
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.load_verify_locations(cafile=str(cert_path))
+    return context
+
+
+async def _fake_identity_verifier(github_token: str) -> github_identity.GithubIdentity:
+    return github_identity.GithubIdentity(id="1", login="octocat")
+
+
+def test_parse_args_requires_all_flags():
+    with pytest.raises(SystemExit):
+        parse_args([])
+
+
+def test_parse_args_valid(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    cert_path.write_text("placeholder")
+    token_file = tmp_path / "token"
+    token_file.write_text("secret")
+    args = parse_args(
+        [
+            "--coordinator-url", "wss://example:8765",
+            "--coordinator-cert", str(cert_path),
+            "--token-file", str(token_file),
+            "--identity", "octocat",
+        ]
+    )
+    assert args.coordinator_url == "wss://example:8765"
+    assert str(args.coordinator_cert) == str(cert_path)
+    assert str(args.token_file) == str(token_file)
+    assert args.identity == "octocat"
+
+
+async def test_ban_identity_disconnects_registered_node(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as node_ws:
+            private_key = crypto.generate_keypair()
+            public_key = crypto.public_key_b64(private_key)
+            await registration.register(
+                node_ws, model="Qwen/Qwen2.5-7B-Instruct", node_id="node-a",
+                public_key=public_key, signature=crypto.sign_public_key(private_key),
+                github_token="valid-github-token",
+            )
+
+            disconnected_count = await ban_identity(
+                f"wss://127.0.0.1:{port}", cert_path, "secret-token", "octocat"
+            )
+
+    assert disconnected_count == 1
+
+
+async def test_ban_identity_raises_on_unknown_identity(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        with pytest.raises(BanError, match="no known identity"):
+            await ban_identity(f"wss://127.0.0.1:{port}", cert_path, "secret-token", "nobody")
+
+
+async def test_ban_identity_raises_on_unexpected_reply_type(tmp_path):
+    """A reply that's neither "banned" nor "ban_failed" must not be
+    silently treated as a successful ban with 0 disconnects — see
+    Finding 4 of the final whole-branch review for issue #37."""
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+    ssl_context = server.build_ssl_context(cert_path, key_path)
+
+    async def handler(websocket):
+        await websocket.recv()
+        await websocket.send(json.dumps({"type": "something_else"}))
+
+    async with websockets.serve(handler, "127.0.0.1", 0, ssl=ssl_context) as fake_coordinator:
+        port = fake_coordinator.sockets[0].getsockname()[1]
+        with pytest.raises(BanError, match="unexpected reply"):
+            await ban_identity(f"wss://127.0.0.1:{port}", cert_path, "secret-token", "octocat")
+
+
+async def test_ban_identity_raises_on_wrong_token(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        with pytest.raises(BanError, match="rejected"):
+            await ban_identity(f"wss://127.0.0.1:{port}", cert_path, "wrong-token", "octocat")
+
+
+def test_main_prints_success_message(tmp_path, monkeypatch, capsys):
+    cert_path = tmp_path / "cert.pem"
+    cert_path.write_text("placeholder")
+    token_file = tmp_path / "token"
+    token_file.write_text("secret")
+
+    async def fake_ban_identity(coordinator_url, coordinator_cert, token, identity):
+        return 2
+
+    monkeypatch.setattr(ban_cli, "ban_identity", fake_ban_identity)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "mycelium-coordinator-ban",
+            "--coordinator-url", "wss://example:8765",
+            "--coordinator-cert", str(cert_path),
+            "--token-file", str(token_file),
+            "--identity", "octocat",
+        ],
+    )
+
+    ban_cli.main()
+
+    out = capsys.readouterr().out
+    assert out == "banned 'octocat' — disconnected 2 currently-registered node(s)\n"
+
+
+def test_main_prints_error_and_exits_1_on_ban_error(tmp_path, monkeypatch, capsys):
+    cert_path = tmp_path / "cert.pem"
+    cert_path.write_text("placeholder")
+    token_file = tmp_path / "token"
+    token_file.write_text("secret")
+
+    async def fake_ban_identity(coordinator_url, coordinator_cert, token, identity):
+        raise BanError("no known identity bound to GitHub login 'nobody'")
+
+    monkeypatch.setattr(ban_cli, "ban_identity", fake_ban_identity)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "mycelium-coordinator-ban",
+            "--coordinator-url", "wss://example:8765",
+            "--coordinator-cert", str(cert_path),
+            "--token-file", str(token_file),
+            "--identity", "nobody",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        ban_cli.main()
+
+    assert exc_info.value.code == 1
+    out = capsys.readouterr().out
+    assert out == "error: no known identity bound to GitHub login 'nobody'\n"

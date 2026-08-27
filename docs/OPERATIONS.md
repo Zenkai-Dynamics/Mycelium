@@ -6,7 +6,8 @@ This walks through actually **running** Mycelium end to end: standing up
 a coordinator, connecting a node to it, and sending a completion through
 as a client. It assumes you've already followed
 [SETUP.md](SETUP.md) to get `mycelium-coordinator`, `mycelium-node`,
-`mycelium-coordinator-status`, and `mycelium-client` installed.
+`mycelium-coordinator-status`, `mycelium-coordinator-ban`, and
+`mycelium-client` installed.
 
 If you just want to confirm a GPU node's vLLM stack works at all,
 without any coordinator involved, skip to
@@ -61,7 +62,8 @@ chmod 600 ~/.mycelium/token
 
 Copy this same file (or its contents) to every client machine —
 `scp ~/.mycelium/token <client-host>:~/.mycelium/token`, etc. Anyone who
-has it can submit completions, so treat it like a password.
+has it can submit completions **and ban any node's identity** (see
+Step 6), so treat it like a password.
 
 ## Step 2 — Start the coordinator
 
@@ -262,6 +264,36 @@ If the node that was about to handle your request turns out to be
 disconnected, the coordinator silently retries a different healthy node
 before giving up — you'll never see that as a client-visible error as
 long as another healthy node for the same model exists.
+
+## Step 6 — Ban a misbehaving identity (operator override)
+
+If a volunteer's node needs to be removed for cause — e.g. a report of
+bad-faith output that never tripped a timeout or crash counter — revoke
+their bound GitHub identity outright:
+
+```bash
+mycelium-coordinator-ban \
+  --coordinator-url wss://<coordinator-ip>:8765 \
+  --coordinator-cert ~/.mycelium/coordinator-cert.pem \
+  --token-file ~/.mycelium/token \
+  --identity <github-login>
+```
+
+Use the login shown by `mycelium-coordinator-status`'s `(github:<login>)`
+suffix. On success:
+
+```
+banned 'octocat' — disconnected 1 currently-registered node(s)
+```
+
+Every currently-registered node under that identity is disconnected
+immediately, and every future registration attempt from it is rejected
+with `this identity has been banned by the operator` — reconnects using
+an already-registered key included. There's no unban command: ban state
+is in-memory only, like every other piece of coordinator state, so a
+coordinator restart is the only way to reverse a ban. Banning a GitHub
+login the coordinator has never seen bind to any node fails instead:
+`error: no known identity bound to GitHub login '<login>'`.
 
 ## Troubleshooting
 

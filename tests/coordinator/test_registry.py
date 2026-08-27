@@ -6,7 +6,13 @@ import random
 import pytest
 
 from mycelium.coordinator import github_identity
-from mycelium.coordinator.registry import IdentityCapReached, MissingGithubToken, NodeRegistry
+from mycelium.coordinator.registry import (
+    IdentityBanned,
+    IdentityCapReached,
+    MissingGithubToken,
+    NodeRegistry,
+    UnknownIdentity,
+)
 
 # Valid base64-encoded 32-byte public keys (matching Ed25519 length)
 # Generated from raw bytes (32 bytes each) for testing purposes.
@@ -552,3 +558,98 @@ def test_find_node_for_model_weighted_draw_uses_injected_random_source():
     picks_1 = [registry_1.find_node_for_model("model-a").public_key for _ in range(20)]
     picks_2 = [registry_2.find_node_for_model("model-a").public_key for _ in range(20)]
     assert picks_1 == picks_2
+
+
+async def test_enforce_not_banned_allows_unbanned_identity():
+    registry = NodeRegistry("secret", identity_verifier=_fake_verifier)
+    identity = await registry.resolve_identity(PUBKEY_A, "good-token")
+    registry.enforce_not_banned(identity)  # must not raise
+
+
+def test_ban_identity_raises_unknown_identity_for_unseen_login():
+    registry = NodeRegistry("secret")
+    try:
+        registry.ban_identity("nobody")
+        assert False, "expected UnknownIdentity"
+    except UnknownIdentity:
+        pass
+
+
+async def test_ban_identity_then_enforce_not_banned_raises():
+    registry = NodeRegistry("secret", identity_verifier=_fake_verifier)
+    identity = await registry.resolve_identity(PUBKEY_A, "good-token")
+
+    registry.ban_identity("octocat")
+
+    try:
+        registry.enforce_not_banned(identity)
+        assert False, "expected IdentityBanned"
+    except IdentityBanned as exc:
+        assert str(exc) == "this identity has been banned by the operator"
+
+
+async def test_ban_identity_returns_currently_registered_nodes_under_that_identity():
+    registry = NodeRegistry("secret", identity_verifier=_fake_verifier)
+    await registry.resolve_identity(PUBKEY_A, "good-token")
+    registry.register(PUBKEY_A, "node-a", "m", websocket="ws-a")
+
+    disconnected = registry.ban_identity("octocat")
+
+    assert [node.public_key for node in disconnected] == [PUBKEY_A]
+
+
+async def test_ban_identity_returns_empty_list_when_identity_has_no_registered_nodes():
+    registry = NodeRegistry("secret", identity_verifier=_fake_verifier)
+    # PUBKEY_A resolved the identity (e.g. registration is mid-flight) but
+    # was never actually registered as a node.
+    await registry.resolve_identity(PUBKEY_A, "good-token")
+
+    disconnected = registry.ban_identity("octocat")
+
+    assert disconnected == []
+
+
+async def test_ban_identity_does_not_unregister_nodes():
+    """ban_identity only marks the identity banned and reports which nodes
+    are affected — the caller (server.py) is responsible for actually
+    disconnecting them. See the design doc for issue #37."""
+    registry = NodeRegistry("secret", identity_verifier=_fake_verifier)
+    await registry.resolve_identity(PUBKEY_A, "good-token")
+    registry.register(PUBKEY_A, "node-a", "m", websocket="ws-a")
+
+    registry.ban_identity("octocat")
+
+    assert registry.get(PUBKEY_A) is not None
+
+
+async def test_enforce_not_banned_has_no_exemption_for_already_registered_key():
+    """Unlike enforce_identity_cap, a banned identity's reconnect using its
+    already-registered key must still be rejected — that's the literal
+    acceptance criterion for #37."""
+    registry = NodeRegistry("secret", identity_verifier=_fake_verifier)
+    identity = await registry.resolve_identity(PUBKEY_A, "good-token")
+    registry.register(PUBKEY_A, "node-a", "m", websocket="ws-a")
+    registry.ban_identity("octocat")
+
+    try:
+        registry.enforce_not_banned(identity)
+        assert False, "expected IdentityBanned"
+    except IdentityBanned:
+        pass
+
+
+async def test_ban_identity_only_bans_matching_identity():
+    async def two_identity_verifier(github_token):
+        if github_token == "token-x":
+            return github_identity.GithubIdentity(id="X", login="x-user")
+        return github_identity.GithubIdentity(id="Y", login="y-user")
+
+    registry = NodeRegistry("secret", identity_verifier=two_identity_verifier)
+    await registry.resolve_identity(PUBKEY_A, "token-x")
+    registry.register(PUBKEY_A, "node-a", "m", websocket="ws-a")
+    identity_y = await registry.resolve_identity(PUBKEY_B, "token-y")
+    registry.register(PUBKEY_B, "node-b", "m", websocket="ws-b")
+
+    registry.ban_identity("x-user")
+
+    registry.enforce_not_banned(identity_y)  # must not raise — a different identity
