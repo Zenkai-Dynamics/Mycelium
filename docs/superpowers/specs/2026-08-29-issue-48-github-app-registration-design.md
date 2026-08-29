@@ -139,6 +139,35 @@ registration form's "Permissions" section, which governs API access
 scope rather than OAuth scope — these are two different GitHub
 mechanisms that happen to sound similar).
 
+## Amendment (2026-08-29, same day): ownership reverted to personal account
+
+The "Ownership" decision above was reopened, not overridden silently, when
+attempting to execute it: the operator visited
+`https://github.com/organizations/Zenkai-Dynamics/settings/apps/new` and
+got a 404, not the registration form. Checked empirically, not
+guessed — `gh api orgs/Zenkai-Dynamics/memberships/Varun-Gambhir` returned
+`role=member`, and `gh api "orgs/Zenkai-Dynamics/members?role=admin"`
+returned only `gabbarX`. GitHub App creation for an org is Owner-gated by
+default (no `members_can_create_apps`-style toggle exists in the org's
+settings the way one does for repos/teams/pages), and no one had granted
+the operator the separate "GitHub App manager" role. Two paths were on
+the table: ask `gabbarX` (the actual org Owner) to grant that role or
+register the App themselves, or fall back to the operator's personal
+account now. **The operator chose the personal-account fallback** —
+faster to unblock immediately, at the cost of the durability property the
+original decision was optimizing for (see above: an App tied to one
+person's account is a single point of failure for every volunteer's
+future authentication if that person ever loses access). This is a
+conscious, named tradeoff, not an oversight — revisiting it (re-registering
+under the org once someone grants the right permission) remains possible
+later, at the same re-authorization cost described above for any
+ownership migration.
+
+Every other decision in this doc is unaffected by this change — "Only on
+this account" (§ Installation scope) now refers to the operator's
+personal account rather than the org, but the reasoning (nobody installs
+this App anywhere) is identical either way.
+
 ## Deliverable: what actually happens next
 
 No plan doc follows this design doc — the "implementation" is a
