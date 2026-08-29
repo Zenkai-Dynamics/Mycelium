@@ -19,12 +19,23 @@ from dataclasses import dataclass
 GITHUB_DEVICE_CODE_URL = "https://github.com/login/device/code"
 GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
 
+# A sentinel, not the shipped default — kept as its own named constant
+# (rather than inlined in the guard below) so tests can put CLIENT_ID into
+# the "not configured" state explicitly, independent of whatever value
+# actually ships. See Finding 5 of issue #34's final whole-branch review:
+# a test that instead relied on the shipped CLIENT_ID literally being this
+# placeholder would break the moment issue #48 swapped in a real value.
+PLACEHOLDER_CLIENT_ID = "REPLACE_ME_WITH_REAL_GITHUB_APP_CLIENT_ID"
+
 # Not secret — ships embedded in the mycelium-node package, the same way
 # tools like the GitHub CLI embed their own device-flow client_id. This is
-# a placeholder until the real GitHub App is registered (a follow-up,
-# out-of-band operator action — see the design doc for issue #34 and
-# docs/OPERATIONS.md).
-CLIENT_ID = "REPLACE_ME_WITH_REAL_GITHUB_APP_CLIENT_ID"
+# the real, registered GitHub App's client_id (issue #48) — device flow
+# enabled, "Expire user authorization tokens" off, "No access" permissions,
+# installable only on the owning account. Verified live: device-flow
+# authorization from an unrelated GitHub account succeeds, confirming the
+# install-scope restriction doesn't block outside volunteers (see the
+# design doc for issue #48).
+CLIENT_ID = "Iv23li695Ty38NLrU0K3"
 
 # Bounds each blocking HTTP call, same reasoning as
 # coordinator/github_identity.VERIFY_TIMEOUT_SECONDS.
@@ -112,7 +123,7 @@ def request_device_code() -> DeviceCode:
     see the design doc for issue #34 on why this fails fast instead of
     letting a misconfigured deployment fail deep inside the polling loop
     with GitHub's opaque incorrect_client_credentials."""
-    if CLIENT_ID == "REPLACE_ME_WITH_REAL_GITHUB_APP_CLIENT_ID":
+    if CLIENT_ID == PLACEHOLDER_CLIENT_ID:
         raise DeviceFlowConfigError(
             "mycelium-node's GitHub App is not configured yet — see docs/OPERATIONS.md"
         )
