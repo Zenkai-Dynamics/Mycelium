@@ -1,6 +1,6 @@
 # Phase 1 — Open Network
 
-Status: Brainstormed and PRD published ([issue #31](https://github.com/Zenkai-Dynamics/Mycelium/issues/31)) — not yet implemented
+Status: Built ([issue #31](https://github.com/Zenkai-Dynamics/Mycelium/issues/31))
 Depends on: [Phase 0](phase-0-foundation.md) working end to end
 Related: [Phase 1 design rationale](../superpowers/specs/2026-08-23-phase-1-open-network-design.md)
 
