@@ -116,30 +116,47 @@ copied over, a node authenticates with its own self-generated keypair
 plus a one-time GitHub sign-in (issue #39) — not the shared token from
 Step 1.
 
-**Get a GitHub token for the node's first registration.** Until issue #34
-adds a built-in device-flow sign-in, obtain one by hand — e.g.
+**GitHub sign-in for the node's first registration.** The first time this
+node's keypair registers, `mycelium-node` drives GitHub's OAuth device
+flow itself — no browser or open inbound port needed on the node:
+
+```bash
+mycelium-node \
+  --coordinator-url wss://<coordinator-ip>:8765 \
+  --coordinator-cert ~/.mycelium/coordinator-cert.pem
+```
+
+```
+First copy your one-time code: ABCD-1234
+Then visit: https://github.com/login/device and enter it
+```
+
+Copy the code, open that URL on any device with a browser (not
+necessarily the node itself), and authorize it. `mycelium-node` polls in
+the background and continues automatically once you do — no restart, no
+extra flag. The resulting token is cached to `~/.mycelium/github-token`
+(`chmod 600`), so this only happens once per node; every later run (or
+reconnect) reuses the cached token silently. `--github-token-file` points
+at a token file you supply yourself — it never becomes a device-flow
+cache location itself; if it's missing, `mycelium-node` exits immediately
+rather than falling back to the interactive flow.
+
+Prefer to supply a token yourself instead of the interactive flow — e.g.
 `gh auth token` if you have the GitHub CLI authenticated, or a Personal
-Access Token from `github.com/settings/tokens` (classic or fine-grained;
-no scopes are required, since only `GET /user` is called). Save it to a
-file only the node can read:
+Access Token from `github.com/settings/tokens` (no scopes are required,
+since only `GET /user` is called)? Save it to that same path yourself
+before starting the node, or point `--github-token-file` at wherever you
+saved it:
 
 ```bash
 echo "<your-github-token>" > ~/.mycelium/github-token
 chmod 600 ~/.mycelium/github-token
 ```
 
-This is only needed the **first** time this node's keypair registers —
-the coordinator remembers the binding for as long as it keeps running
-(see the limitation below), and a reconnecting node with an
-already-known public key is accepted without it. It's harmless to keep
-passing `--github-token-file` on every run regardless.
-
-```bash
-mycelium-node \
-  --coordinator-url wss://<coordinator-ip>:8765 \
-  --coordinator-cert ~/.mycelium/coordinator-cert.pem \
-  --github-token-file ~/.mycelium/github-token
-```
+Either way, this is only needed the **first** time this node's keypair
+registers — the coordinator remembers the binding for as long as it keeps
+running (see the limitation below), and a reconnecting node with an
+already-known public key is accepted without it.
 
 The node agent shells out to a bare `vllm` command (not a path inside
 its own venv) — make sure the venv's `bin/` directory is on `PATH`
@@ -160,10 +177,12 @@ What happens:
    against the pinned `--coordinator-cert`.
 3. Generates (on first run only — persisted afterward) an Ed25519
    keypair at `~/.mycelium/node-key.pem` by default, override with
-   `--node-key-file`. Sends a registration message (model + node ID +
-   public key + a signature proving it holds the matching private key,
-   plus the GitHub token from `--github-token-file` if this is the
-   key's first registration) and waits for the coordinator to ack it.
+   `--node-key-file`. If this is the key's first registration, obtains a
+   GitHub token — via the cached/hand-supplied `--github-token-file` if
+   one exists, otherwise the interactive device flow above (cached to
+   that same path afterward). Sends a registration message (model + node
+   ID + public key + a signature proving it holds the matching private
+   key, plus that GitHub token) and waits for the coordinator to ack it.
 4. Holds the connection open, handling completion requests the
    coordinator routes to it, until the connection drops — then
    reconnects automatically with exponential backoff (1s, doubling,
@@ -204,12 +223,23 @@ one indistinguishable identity to the coordinator.
 **A coordinator restart forgets every node's GitHub binding** (issue
 #39) — bindings are in-memory only, exactly like the rest of the
 coordinator's registry. Combined with GitHub OAuth's default 8-hour
-access-token expiry, a volunteer's saved `--github-token-file` is quite
-likely already expired by the time any coordinator restart happens, so a
-restart can force a fresh GitHub sign-in, not just a free reconnect.
-Whoever registers Mycelium's GitHub OAuth App (issue #34) should turn
-*off* "Expire user access tokens" in that app's settings to avoid this
-for real deployments.
+access-token expiry, a volunteer's cached `~/.mycelium/github-token` is
+quite likely already expired by the time any coordinator restart
+happens, so a restart can force a fresh GitHub sign-in — `mycelium-node`
+retries registration with backoff but never auto-detects or auto-clears
+a stale cached token; delete `~/.mycelium/github-token` yourself to
+force the device flow to run again. Whoever registers Mycelium's GitHub
+App should turn *off* "Expire user access tokens" in that app's settings
+to avoid this for real deployments.
+
+**`mycelium-node`'s GitHub App `client_id` ships as a placeholder** until
+the operator registers a real GitHub App (device flow enabled, "Expire
+user access tokens" off) and swaps `CLIENT_ID` in
+`src/mycelium/node/github_device_flow.py`. Running the interactive
+device flow before that swap fails immediately with `error:
+mycelium-node's GitHub App is not configured yet` — the manual
+`--github-token-file` path above works regardless, since it never talks
+to the device-flow endpoints at all.
 
 `SIGTERM`/`SIGHUP`/`Ctrl-C` all stop `vllm serve` cleanly (process-group
 kill, no orphaned GPU processes) before the node agent exits.
