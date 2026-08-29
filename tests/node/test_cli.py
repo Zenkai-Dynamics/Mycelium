@@ -360,6 +360,7 @@ async def test_run_authenticates_and_caches_token_when_default_path_missing(
                 default_github_token_path=default_token_path,
                 device_flow_client=client,
                 device_flow_sleep=_no_op_sleep,
+                device_flow_open_browser=_no_op_open_browser,
             )
         )
         await asyncio.wait_for(registered_event.wait(), timeout=5.0)
@@ -779,6 +780,13 @@ async def _no_op_sleep(seconds):
     pass
 
 
+def _no_op_open_browser(url):
+    """Fake for _authenticate's/_run's open_browser param — real tests
+    must never let the real webbrowser.open run, since _device_code()'s
+    default verification_uri is a real, live GitHub URL."""
+    pass
+
+
 def _device_code(**overrides):
     fields = dict(
         device_code="devcode123", user_code="ABCD-1234",
@@ -796,7 +804,7 @@ async def test_authenticate_prints_code_and_returns_token_on_success(capsys):
                  github_device_flow.PollResult(token="gho_abc123", interval=5)]
     )
 
-    token = await _authenticate(client=client, sleep=_no_op_sleep)
+    token = await _authenticate(client=client, sleep=_no_op_sleep, open_browser=_no_op_open_browser)
 
     assert token == "gho_abc123"
     out = capsys.readouterr().out
@@ -812,7 +820,7 @@ async def test_authenticate_keeps_polling_through_authorization_pending():
         + [github_device_flow.PollResult(token="gho_final", interval=5)],
     )
 
-    token = await _authenticate(client=client, sleep=_no_op_sleep)
+    token = await _authenticate(client=client, sleep=_no_op_sleep, open_browser=_no_op_open_browser)
 
     assert token == "gho_final"
     assert len(client.poll_once_calls) == 4
@@ -826,7 +834,7 @@ async def test_authenticate_uses_updated_interval_after_slow_down():
          github_device_flow.PollResult(token="gho_abc", interval=12)],
     )
 
-    await _authenticate(client=client, sleep=_no_op_sleep)
+    await _authenticate(client=client, sleep=_no_op_sleep, open_browser=_no_op_open_browser)
 
     # First poll uses the device's initial interval (5); the second poll
     # must use the interval slow_down returned (12), not the original 5.
@@ -847,7 +855,7 @@ async def test_authenticate_requests_a_fresh_code_after_expired_token(capsys):
         [github_device_flow.DeviceCodeExpired(), github_device_flow.PollResult(token="gho_x", interval=5)],
     )
 
-    token = await _authenticate(client=client, sleep=_no_op_sleep)
+    token = await _authenticate(client=client, sleep=_no_op_sleep, open_browser=_no_op_open_browser)
 
     assert token == "gho_x"
     assert client.request_device_code_calls == 2
@@ -862,7 +870,7 @@ async def test_authenticate_exits_on_authorization_denied():
     client = _FakeDeviceFlowClient(device, [github_device_flow.AuthorizationDenied()])
 
     with pytest.raises(SystemExit, match="denied"):
-        await _authenticate(client=client, sleep=_no_op_sleep)
+        await _authenticate(client=client, sleep=_no_op_sleep, open_browser=_no_op_open_browser)
 
 
 async def test_authenticate_exits_on_device_flow_config_error_from_poll():
@@ -872,7 +880,7 @@ async def test_authenticate_exits_on_device_flow_config_error_from_poll():
     )
 
     with pytest.raises(SystemExit, match="unexpected response"):
-        await _authenticate(client=client, sleep=_no_op_sleep)
+        await _authenticate(client=client, sleep=_no_op_sleep, open_browser=_no_op_open_browser)
 
 
 async def test_authenticate_exits_on_device_flow_config_error_from_initial_request():
@@ -884,29 +892,22 @@ async def test_authenticate_exits_on_device_flow_config_error_from_initial_reque
         await _authenticate(client=_FailingClient(), sleep=_no_op_sleep)
 
 
-async def test_authenticate_opens_browser_to_verification_uri(monkeypatch):
-    import webbrowser
-
+async def test_authenticate_opens_browser_to_verification_uri():
     opened = []
-    monkeypatch.setattr(webbrowser, "open", lambda url: opened.append(url))
 
     device = _device_code(verification_uri="https://github.com/login/device")
     client = _FakeDeviceFlowClient(
         device, [github_device_flow.PollResult(token="gho_abc", interval=5)]
     )
 
-    await _authenticate(client=client, sleep=_no_op_sleep)
+    await _authenticate(client=client, sleep=_no_op_sleep, open_browser=opened.append)
 
     assert opened == ["https://github.com/login/device"]
 
 
-async def test_authenticate_swallows_browser_open_failures(monkeypatch, capsys):
-    import webbrowser
-
+async def test_authenticate_swallows_browser_open_failures(capsys):
     def raising_open(url):
         raise RuntimeError("no display available")
-
-    monkeypatch.setattr(webbrowser, "open", raising_open)
 
     device = _device_code()
     client = _FakeDeviceFlowClient(
@@ -915,6 +916,6 @@ async def test_authenticate_swallows_browser_open_failures(monkeypatch, capsys):
 
     # Must not raise — a headless box without a display must never see an
     # error from the best-effort browser-open convenience.
-    token = await _authenticate(client=client, sleep=_no_op_sleep)
+    token = await _authenticate(client=client, sleep=_no_op_sleep, open_browser=raising_open)
 
     assert token == "gho_abc"

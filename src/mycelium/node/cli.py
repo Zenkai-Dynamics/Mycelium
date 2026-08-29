@@ -60,7 +60,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
-async def _request_and_print_code(client) -> github_device_flow.DeviceCode:
+async def _request_and_print_code(client, open_browser=webbrowser.open) -> github_device_flow.DeviceCode:
     """Request a fresh device code, print the volunteer-facing
     instructions, and best-effort open a browser to the verification URL.
     Raises SystemExit if CLIENT_ID is still the shipped placeholder — see
@@ -72,18 +72,18 @@ async def _request_and_print_code(client) -> github_device_flow.DeviceCode:
     print(f"First copy your one-time code: {device.user_code}", flush=True)
     print(f"Then visit: {device.verification_uri} and enter it", flush=True)
     try:
-        webbrowser.open(device.verification_uri)
+        open_browser(device.verification_uri)
     except Exception:
         pass
     return device
 
 
-async def _authenticate(client=github_device_flow, sleep=asyncio.sleep) -> str:
+async def _authenticate(client=github_device_flow, sleep=asyncio.sleep, open_browser=webbrowser.open) -> str:
     """Drive GitHub's OAuth device flow to completion and return the
     resulting access token. Only ever called when no usable GitHub token
     was found on disk — see _run(). See the design doc for issue #34 for
     the full polling-error decision table."""
-    device = await _request_and_print_code(client)
+    device = await _request_and_print_code(client, open_browser)
     interval = device.interval
     while True:
         await sleep(interval)
@@ -91,7 +91,7 @@ async def _authenticate(client=github_device_flow, sleep=asyncio.sleep) -> str:
             result = await asyncio.to_thread(client.poll_once, device.device_code, interval)
         except github_device_flow.DeviceCodeExpired:
             print("Code expired, requesting a new one...", flush=True)
-            device = await _request_and_print_code(client)
+            device = await _request_and_print_code(client, open_browser)
             interval = device.interval
             continue
         except github_device_flow.AuthorizationDenied:
@@ -109,6 +109,7 @@ async def _run(
     default_github_token_path: Path = DEFAULT_GITHUB_TOKEN_PATH,
     device_flow_client=github_device_flow,
     device_flow_sleep=asyncio.sleep,
+    device_flow_open_browser=webbrowser.open,
 ) -> None:
     node_id = None
     public_key = None
@@ -138,7 +139,9 @@ async def _run(
             if not github_token:
                 raise SystemExit(f"{default_github_token_path} is empty")
         else:
-            github_token = await _authenticate(device_flow_client, device_flow_sleep)
+            github_token = await _authenticate(
+                device_flow_client, device_flow_sleep, device_flow_open_browser
+            )
             default_github_token_path.parent.mkdir(parents=True, exist_ok=True)
             default_github_token_path.write_text(github_token)
             default_github_token_path.chmod(0o600)
