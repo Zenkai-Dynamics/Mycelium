@@ -136,8 +136,10 @@ necessarily the node itself), and authorize it. `mycelium-node` polls in
 the background and continues automatically once you do — no restart, no
 extra flag. The resulting token is cached to `~/.mycelium/github-token`
 (`chmod 600`), so this only happens once per node; every later run (or
-reconnect) reuses the cached token silently. Override the cache location
-with `--github-token-file`.
+reconnect) reuses the cached token silently. `--github-token-file` points
+at a token file you supply yourself — it never becomes a device-flow
+cache location itself; if it's missing, `mycelium-node` exits immediately
+rather than falling back to the interactive flow.
 
 Prefer to supply a token yourself instead of the interactive flow — e.g.
 `gh auth token` if you have the GitHub CLI authenticated, or a Personal

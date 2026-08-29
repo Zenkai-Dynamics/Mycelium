@@ -60,7 +60,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
-async def _request_and_print_code(client, open_browser=webbrowser.open) -> github_device_flow.DeviceCode:
+async def _request_and_print_code(client, open_browser=None) -> github_device_flow.DeviceCode:
     """Request a fresh device code, print the volunteer-facing
     instructions, and best-effort open a browser to the verification URL.
     Raises SystemExit if CLIENT_ID is still the shipped placeholder — see
@@ -72,13 +72,13 @@ async def _request_and_print_code(client, open_browser=webbrowser.open) -> githu
     print(f"First copy your one-time code: {device.user_code}", flush=True)
     print(f"Then visit: {device.verification_uri} and enter it", flush=True)
     try:
-        open_browser(device.verification_uri)
+        (open_browser or webbrowser.open)(device.verification_uri)
     except Exception:
         pass
     return device
 
 
-async def _authenticate(client=github_device_flow, sleep=asyncio.sleep, open_browser=webbrowser.open) -> str:
+async def _authenticate(client=github_device_flow, sleep=asyncio.sleep, open_browser=None) -> str:
     """Drive GitHub's OAuth device flow to completion and return the
     resulting access token. Only ever called when no usable GitHub token
     was found on disk — see _run(). See the design doc for issue #34 for
@@ -109,7 +109,7 @@ async def _run(
     default_github_token_path: Path = DEFAULT_GITHUB_TOKEN_PATH,
     device_flow_client=github_device_flow,
     device_flow_sleep=asyncio.sleep,
-    device_flow_open_browser=webbrowser.open,
+    device_flow_open_browser=None,
 ) -> None:
     node_id = None
     public_key = None
@@ -146,6 +146,10 @@ async def _run(
             default_github_token_path.write_text(github_token)
             default_github_token_path.chmod(0o600)
 
+        token_path = (
+            args.github_token_file if args.github_token_file is not None else default_github_token_path
+        )
+
     print(f"starting vLLM ({args.model} on GPU {args.gpu})...", flush=True)
     await asyncio.to_thread(process.start)
     try:
@@ -172,7 +176,7 @@ async def _run(
                 delay = next(registration_backoff)
                 hint = (
                     f" (this looks like a stale GitHub token — delete "
-                    f"{default_github_token_path} to re-authenticate)"
+                    f"{token_path} to re-authenticate)"
                     if str(exc) == _STALE_GITHUB_TOKEN_REASON else ""
                 )
                 print(f"registration failed: {exc}; retrying in {delay:.1f}s{hint}", flush=True)

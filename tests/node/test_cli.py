@@ -455,6 +455,60 @@ async def test_run_prints_stale_token_hint_on_matching_rejection_reason(
     assert str(default_token_path) in out
 
 
+async def test_run_prints_stale_token_hint_naming_the_explicit_token_file_when_one_was_passed(
+    tmp_path, monkeypatch, fake_vllm_server, capsys
+):
+    """Regression test for the final-review finding: when --github-token-file
+    is passed explicitly, the stale-token retry hint must name that file —
+    not the unrelated default cache path, which was never even consulted."""
+    vllm_port = fake_vllm_server.server_address[1]
+    monkeypatch.setattr(
+        vllm_process, "build_command", lambda model, port_: [sys.executable, "-c", "import time; time.sleep(600)"]
+    )
+
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+    github_token_file = tmp_path / "explicit-github-token"
+    github_token_file.write_text("stale-token")
+    default_token_path = tmp_path / "unused-default-github-token"
+
+    async def rejecting_coordinator(websocket):
+        await websocket.recv()
+        await websocket.send(json.dumps(
+            {"type": "registration_rejected", "reason": "invalid or expired GitHub token"}
+        ))
+        await websocket.close()
+
+    server_ctx = _server_ssl_context(cert_path, key_path)
+    async with websockets.serve(rejecting_coordinator, "127.0.0.1", 0, ssl=server_ctx) as coordinator:
+        coord_port = coordinator.sockets[0].getsockname()[1]
+        args = parse_args(
+            [
+                "--coordinator-url", f"wss://127.0.0.1:{coord_port}",
+                "--coordinator-cert", str(cert_path),
+                "--github-token-file", str(github_token_file),
+                "--vllm-port", str(vllm_port),
+                "--node-key-file", str(tmp_path / "node-key.pem"),
+            ]
+        )
+        process = vllm_process.VLLMProcess(model=args.model, gpu=args.gpu, port=args.vllm_port)
+        run_task = asyncio.create_task(
+            _run(args, process, default_github_token_path=default_token_path)
+        )
+        await asyncio.sleep(1.5)  # let it attempt once and get rejected
+        run_task.cancel()
+        try:
+            await run_task
+        except asyncio.CancelledError:
+            pass
+
+    out = capsys.readouterr().out
+    assert "stale GitHub token" in out
+    assert str(github_token_file) in out
+    assert str(default_token_path) not in out
+
+
 async def test_run_answers_a_routed_complete_request(tmp_path, monkeypatch, fake_vllm_server):
     vllm_port = fake_vllm_server.server_address[1]
     monkeypatch.setattr(
@@ -889,7 +943,7 @@ async def test_authenticate_exits_on_device_flow_config_error_from_initial_reque
             raise github_device_flow.DeviceFlowConfigError("not configured yet")
 
     with pytest.raises(SystemExit, match="not configured"):
-        await _authenticate(client=_FailingClient(), sleep=_no_op_sleep)
+        await _authenticate(client=_FailingClient(), sleep=_no_op_sleep, open_browser=_no_op_open_browser)
 
 
 async def test_authenticate_opens_browser_to_verification_uri():
@@ -919,3 +973,27 @@ async def test_authenticate_swallows_browser_open_failures(capsys):
     token = await _authenticate(client=client, sleep=_no_op_sleep, open_browser=raising_open)
 
     assert token == "gho_abc"
+
+
+async def test_authenticate_open_browser_default_resolves_webbrowser_open_at_call_time(monkeypatch):
+    """Regression test for the final-review finding: open_browser's default
+    must be resolved fresh on every call (`open_browser or webbrowser.open`),
+    not bound once to the real function at import time — otherwise a
+    monkeypatch.setattr(webbrowser, "open", ...) applied after cli.py was
+    imported (i.e. in every test) would silently have no effect on calls
+    that fall through to the default, which is exactly what defeats the
+    tests/conftest.py safety net for this same incident."""
+    import webbrowser
+
+    opened = []
+    monkeypatch.setattr(webbrowser, "open", lambda url: opened.append(url))
+
+    device = _device_code(verification_uri="https://github.com/login/device")
+    client = _FakeDeviceFlowClient(
+        device, [github_device_flow.PollResult(token="gho_abc", interval=5)]
+    )
+
+    # No open_browser passed — relies entirely on the default.
+    await _authenticate(client=client, sleep=_no_op_sleep)
+
+    assert opened == ["https://github.com/login/device"]
