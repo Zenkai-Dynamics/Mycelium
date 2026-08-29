@@ -374,6 +374,28 @@ anywhere the whole internet could pick it up expecting it to still mean
 something private, since anyone with a copy can pin to and successfully
 validate that same coordinator.
 
+## What this network does not protect against
+
+**A volunteer node sees your prompt in plaintext.** Running inference
+requires the model to read the actual tokens — there's no way to hide a
+prompt from the machine computing over it without breaking inference
+itself. This is the same transparency model Folding@home already uses
+for its work units: you're handing work to a stranger's machine, and
+that machine necessarily sees what it's computing. Don't send anything
+through Mycelium you wouldn't want a volunteer operator to read.
+
+**Mycelium does not verify a node's output is correct.** The coordinator
+only checks protocol-level health — did the node respond, time out, or
+crash — never the content of the response. "The node responded" and "the
+response is trustworthy" are different claims; Phase 1 only makes the
+first one. Redundant-computation-style validation (comparing two nodes'
+output for the same prompt, the way BOINC/Folding@home validate
+deterministic compute) doesn't map cleanly onto LLM inference: sampling
+is stochastic, so two honest nodes can legitimately disagree
+token-for-token on the same prompt. A bad-faith or malfunctioning node's
+wrong output looks, at the protocol level, identical to a correct one —
+nothing here catches that today.
+
 ## Just testing vLLM on a node, no coordinator
 
 To confirm a GPU node's vLLM stack works in isolation, without
