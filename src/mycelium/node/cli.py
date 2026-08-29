@@ -8,11 +8,12 @@ import logging
 import signal
 import socket
 import sys
+import webbrowser
 from pathlib import Path
 
 from mycelium import __version__
 from mycelium import crypto
-from mycelium.node import connection, identity, registration, request_handler
+from mycelium.node import connection, github_device_flow, identity, registration, request_handler
 from mycelium.node.vllm_process import (
     DEFAULT_GPU,
     DEFAULT_MODEL,
@@ -47,6 +48,49 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("either --coordinator-url/--coordinator-cert or --prompt is required")
 
     return args
+
+
+async def _request_and_print_code(client) -> github_device_flow.DeviceCode:
+    """Request a fresh device code, print the volunteer-facing
+    instructions, and best-effort open a browser to the verification URL.
+    Raises SystemExit if CLIENT_ID is still the shipped placeholder — see
+    the design doc for issue #34."""
+    try:
+        device = await asyncio.to_thread(client.request_device_code)
+    except github_device_flow.DeviceFlowConfigError as exc:
+        raise SystemExit(f"error: {exc}")
+    print(f"First copy your one-time code: {device.user_code}", flush=True)
+    print(f"Then visit: {device.verification_uri} and enter it", flush=True)
+    try:
+        webbrowser.open(device.verification_uri)
+    except Exception:
+        pass
+    return device
+
+
+async def _authenticate(client=github_device_flow, sleep=asyncio.sleep) -> str:
+    """Drive GitHub's OAuth device flow to completion and return the
+    resulting access token. Only ever called when no usable GitHub token
+    was found on disk — see _run(). See the design doc for issue #34 for
+    the full polling-error decision table."""
+    device = await _request_and_print_code(client)
+    interval = device.interval
+    while True:
+        await sleep(interval)
+        try:
+            result = await asyncio.to_thread(client.poll_once, device.device_code, interval)
+        except github_device_flow.DeviceCodeExpired:
+            print("Code expired, requesting a new one...", flush=True)
+            device = await _request_and_print_code(client)
+            interval = device.interval
+            continue
+        except github_device_flow.AuthorizationDenied:
+            raise SystemExit("GitHub sign-in was denied. Re-run mycelium-node to try again.")
+        except github_device_flow.DeviceFlowConfigError as exc:
+            raise SystemExit(f"error: {exc}")
+        interval = result.interval
+        if result.token is not None:
+            return result.token
 
 
 async def _run(args: argparse.Namespace, process: VLLMProcess) -> None:

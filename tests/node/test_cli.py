@@ -17,8 +17,8 @@ import pytest
 import websockets
 
 from mycelium.coordinator import certs
-from mycelium.node import vllm_process
-from mycelium.node.cli import _run, parse_args
+from mycelium.node import github_device_flow, vllm_process
+from mycelium.node.cli import _authenticate, _run, parse_args
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -561,3 +561,185 @@ def test_sigterm_stops_vllm_process_group_with_no_orphans(tmp_path):
     time.sleep(0.5)
     assert not _process_alive(parent_pid)
     assert not _process_alive(child_pid)
+
+
+class _FakeDeviceFlowClient:
+    """Scripted device-flow client for _authenticate tests — no real
+    network calls, no real waiting.
+
+    `device_or_devices` is either a single DeviceCode (returned from every
+    request_device_code() call — the common case) or a list of DeviceCode
+    (returned one per call, the last entry repeating once exhausted — only
+    the expired-token test needs this, to prove a fresh code was actually
+    requested and used).
+
+    `poll_responses` is a list consumed one entry per poll_once() call;
+    each entry is either a PollResult or an exception instance to raise.
+    """
+
+    def __init__(self, device_or_devices, poll_responses: list):
+        devices = (
+            device_or_devices if isinstance(device_or_devices, list) else [device_or_devices]
+        )
+        self._devices = list(devices)
+        self.poll_responses = list(poll_responses)
+        self.request_device_code_calls = 0
+        self.poll_once_calls = []
+
+    def request_device_code(self):
+        self.request_device_code_calls += 1
+        if len(self._devices) > 1:
+            return self._devices.pop(0)
+        return self._devices[0]
+
+    def poll_once(self, device_code, interval):
+        self.poll_once_calls.append((device_code, interval))
+        response = self.poll_responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+async def _no_op_sleep(seconds):
+    pass
+
+
+def _device_code(**overrides):
+    fields = dict(
+        device_code="devcode123", user_code="ABCD-1234",
+        verification_uri="https://github.com/login/device",
+        expires_in=900, interval=5,
+    )
+    fields.update(overrides)
+    return github_device_flow.DeviceCode(**fields)
+
+
+async def test_authenticate_prints_code_and_returns_token_on_success(capsys):
+    device = _device_code()
+    client = _FakeDeviceFlowClient(
+        device, [github_device_flow.PollResult(token=None, interval=5),
+                 github_device_flow.PollResult(token="gho_abc123", interval=5)]
+    )
+
+    token = await _authenticate(client=client, sleep=_no_op_sleep)
+
+    assert token == "gho_abc123"
+    out = capsys.readouterr().out
+    assert "ABCD-1234" in out
+    assert "https://github.com/login/device" in out
+
+
+async def test_authenticate_keeps_polling_through_authorization_pending():
+    device = _device_code()
+    client = _FakeDeviceFlowClient(
+        device,
+        [github_device_flow.PollResult(token=None, interval=5)] * 3
+        + [github_device_flow.PollResult(token="gho_final", interval=5)],
+    )
+
+    token = await _authenticate(client=client, sleep=_no_op_sleep)
+
+    assert token == "gho_final"
+    assert len(client.poll_once_calls) == 4
+
+
+async def test_authenticate_uses_updated_interval_after_slow_down():
+    device = _device_code(interval=5)
+    client = _FakeDeviceFlowClient(
+        device,
+        [github_device_flow.PollResult(token=None, interval=12),
+         github_device_flow.PollResult(token="gho_abc", interval=12)],
+    )
+
+    await _authenticate(client=client, sleep=_no_op_sleep)
+
+    # First poll uses the device's initial interval (5); the second poll
+    # must use the interval slow_down returned (12), not the original 5.
+    assert client.poll_once_calls[0][1] == 5
+    assert client.poll_once_calls[1][1] == 12
+
+
+async def test_authenticate_requests_a_fresh_code_after_expired_token(capsys):
+    first_device = _device_code(user_code="OLD-CODE", device_code="old-devcode")
+    second_device = _device_code(user_code="NEW-CODE", device_code="new-devcode")
+    # Two devices in sequence: request_device_code() returns first_device
+    # on the first call (consumed by the initial code print), then
+    # second_device on the second call (the retry after DeviceCodeExpired)
+    # — proving _authenticate actually requested and used a fresh code
+    # rather than reusing the expired one.
+    client = _FakeDeviceFlowClient(
+        [first_device, second_device],
+        [github_device_flow.DeviceCodeExpired(), github_device_flow.PollResult(token="gho_x", interval=5)],
+    )
+
+    token = await _authenticate(client=client, sleep=_no_op_sleep)
+
+    assert token == "gho_x"
+    assert client.request_device_code_calls == 2
+    assert client.poll_once_calls[-1][0] == "new-devcode"
+    out = capsys.readouterr().out
+    assert "OLD-CODE" in out
+    assert "NEW-CODE" in out
+
+
+async def test_authenticate_exits_on_authorization_denied():
+    device = _device_code()
+    client = _FakeDeviceFlowClient(device, [github_device_flow.AuthorizationDenied()])
+
+    with pytest.raises(SystemExit, match="denied"):
+        await _authenticate(client=client, sleep=_no_op_sleep)
+
+
+async def test_authenticate_exits_on_device_flow_config_error_from_poll():
+    device = _device_code()
+    client = _FakeDeviceFlowClient(
+        device, [github_device_flow.DeviceFlowConfigError("unexpected response from GitHub")]
+    )
+
+    with pytest.raises(SystemExit, match="unexpected response"):
+        await _authenticate(client=client, sleep=_no_op_sleep)
+
+
+async def test_authenticate_exits_on_device_flow_config_error_from_initial_request():
+    class _FailingClient:
+        def request_device_code(self):
+            raise github_device_flow.DeviceFlowConfigError("not configured yet")
+
+    with pytest.raises(SystemExit, match="not configured"):
+        await _authenticate(client=_FailingClient(), sleep=_no_op_sleep)
+
+
+async def test_authenticate_opens_browser_to_verification_uri(monkeypatch):
+    import webbrowser
+
+    opened = []
+    monkeypatch.setattr(webbrowser, "open", lambda url: opened.append(url))
+
+    device = _device_code(verification_uri="https://github.com/login/device")
+    client = _FakeDeviceFlowClient(
+        device, [github_device_flow.PollResult(token="gho_abc", interval=5)]
+    )
+
+    await _authenticate(client=client, sleep=_no_op_sleep)
+
+    assert opened == ["https://github.com/login/device"]
+
+
+async def test_authenticate_swallows_browser_open_failures(monkeypatch, capsys):
+    import webbrowser
+
+    def raising_open(url):
+        raise RuntimeError("no display available")
+
+    monkeypatch.setattr(webbrowser, "open", raising_open)
+
+    device = _device_code()
+    client = _FakeDeviceFlowClient(
+        device, [github_device_flow.PollResult(token="gho_abc", interval=5)]
+    )
+
+    # Must not raise — a headless box without a display must never see an
+    # error from the best-effort browser-open convenience.
+    token = await _authenticate(client=client, sleep=_no_op_sleep)
+
+    assert token == "gho_abc"
