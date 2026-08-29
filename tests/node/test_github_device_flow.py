@@ -42,6 +42,12 @@ def _http_error(code: int, body: dict) -> urllib.error.HTTPError:
 def test_request_device_code_fails_fast_without_network_call_when_client_id_is_placeholder(
     monkeypatch,
 ):
+    # Explicitly puts CLIENT_ID into the placeholder state rather than
+    # relying on the shipped default still being unconfigured — once issue
+    # #48 registers a real App, the shipped CLIENT_ID is no longer the
+    # placeholder, so this test must set it up itself.
+    monkeypatch.setattr(github_device_flow, "CLIENT_ID", github_device_flow.PLACEHOLDER_CLIENT_ID)
+
     def fail_if_called(request, timeout):
         raise AssertionError("must not make a network call with the placeholder client_id")
 
