@@ -29,7 +29,7 @@ Each phase links to its own document — the full architecture and open question
 | Phase | Scope | Status | Doc |
 |---|---|---|---|
 | **0** | One LLM. A small, closed pool of nodes the operator personally controls (HPC allocations, VPN-gated lab machines). Prove client → coordinator → node → response round-trips end to end. | **Building now** | [phase-0-foundation.md](docs/phases/phase-0-foundation.md) |
-| **1** | Open the pool to public, opt-in volunteer nodes — torrent/BOINC-style. Still one LLM per request; trust and abuse-prevention become real concerns. | Designed, not yet built ([PRD: issue #31](https://github.com/Zenkai-Dynamics/Mycelium/issues/31)) | [phase-1-open-network.md](docs/phases/phase-1-open-network.md) |
+| **1** | Open the pool to public, opt-in volunteer nodes — torrent/BOINC-style. Still one LLM per request; trust and abuse-prevention become real concerns. | **Built** ([PRD: issue #31](https://github.com/Zenkai-Dynamics/Mycelium/issues/31)) | [phase-1-open-network.md](docs/phases/phase-1-open-network.md) |
 | **2** | Multiple different LLMs hosted across different nodes, composed by an agent's multi-LLM flow. Context/prompt state gets passed between hosts as the agent moves between models. | Future, not yet designed | [phase-2-multi-llm-agentic.md](docs/phases/phase-2-multi-llm-agentic.md) |
 | **3** | Split a single LLM's *layers* across multiple GPU farms (pipeline/model parallelism) for models too large for any one farm to hold; activations pass host to host mid-inference. | Far future, not yet designed | [phase-3-model-parallelism.md](docs/phases/phase-3-model-parallelism.md) |
 
