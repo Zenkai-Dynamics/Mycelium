@@ -13,6 +13,7 @@ import websockets
 
 from mycelium import crypto
 from mycelium.coordinator import certs, router, server
+from mycelium.coordinator import github_identity
 from mycelium.coordinator.registry import NodeRegistry
 
 PUBKEY_A = base64.b64encode(b"a" * 32).decode()
@@ -43,26 +44,44 @@ def _client_ssl_context(cert_path):
     return context
 
 
-def _register_payload(node_id: str, model: str, token: str = "secret-token") -> tuple[dict, str]:
+def _register_payload(
+    node_id: str, model: str, github_token: str | None = "valid-github-token"
+) -> tuple[dict, str]:
     """Build a valid register message with a freshly generated Ed25519
     keypair. Returns (payload, public_key_b64) so callers can compute the
-    expected fingerprint for status-query assertions. Reconnect tests that
-    need the SAME key across two registrations build their payload dicts
-    directly instead of through this helper (see the semantic-rework
-    tests below) — it exists to keep the many one-shot, fresh-key call
-    sites for other tests short."""
+    expected fingerprint for status-query assertions. github_token
+    defaults to a value _fake_identity_verifier always accepts; pass None
+    to omit the field entirely (e.g. a reconnect that needs none) or
+    "bad-github-token" to test rejection. Reconnect tests that need the
+    SAME key across two registrations build their payload dicts directly
+    instead of through this helper — it exists to keep the many one-shot,
+    fresh-key call sites for other tests short."""
     private_key = crypto.generate_keypair()
     public_key_b64 = crypto.public_key_b64(private_key)
     signature_b64 = crypto.sign_public_key(private_key)
     payload = {
         "type": "register",
-        "token": token,
         "model": model,
         "node_id": node_id,
         "public_key": public_key_b64,
         "signature": signature_b64,
     }
+    if github_token is not None:
+        payload["github_token"] = github_token
     return payload, public_key_b64
+
+
+async def _fake_identity_verifier(github_token: str) -> github_identity.GithubIdentity:
+    """Accepts any token except the sentinels "bad-github-token" (a real
+    GitHub rejection) and "unreachable-github-token" (GitHub couldn't be
+    reached at all) — see the design doc for issue #39. Injected into
+    every server.serve(...) call in this file so no test ever makes a
+    real network call to GitHub."""
+    if github_token == "bad-github-token":
+        raise github_identity.InvalidGithubToken("bad token")
+    if github_token == "unreachable-github-token":
+        raise github_identity.GithubUnreachable("could not reach GitHub: timed out")
+    return github_identity.GithubIdentity(id="1", login="octocat")
 
 
 async def test_node_can_connect_over_tls(tmp_path):
@@ -70,7 +89,9 @@ async def test_node_can_connect_over_tls(tmp_path):
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
         port = coordinator.sockets[0].getsockname()[1]
         client_ctx = _client_ssl_context(cert_path)
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws:
@@ -82,7 +103,9 @@ async def test_multiple_nodes_can_connect_simultaneously(tmp_path):
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
         port = coordinator.sockets[0].getsockname()[1]
         client_ctx = _client_ssl_context(cert_path)
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws1:
@@ -100,7 +123,9 @@ async def test_connection_with_wrong_pinned_cert_is_rejected(tmp_path):
     other_key_path = tmp_path / "other-key.pem"
     certs.ensure_cert(other_cert_path, other_key_path, "127.0.0.1")
 
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
         port = coordinator.sockets[0].getsockname()[1]
         wrong_ctx = _client_ssl_context(other_cert_path)
         try:
@@ -115,7 +140,9 @@ async def test_server_survives_abnormal_disconnect(tmp_path):
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
         port = coordinator.sockets[0].getsockname()[1]
         client_ctx = _client_ssl_context(cert_path)
         ws = await websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx)
@@ -131,7 +158,9 @@ async def test_valid_registration_is_accepted(tmp_path):
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
         port = coordinator.sockets[0].getsockname()[1]
         client_ctx = _client_ssl_context(cert_path)
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws:
@@ -141,44 +170,14 @@ async def test_valid_registration_is_accepted(tmp_path):
             assert response == {"type": "registered"}
 
 
-async def test_registration_with_invalid_token_is_rejected_and_closed(tmp_path):
-    cert_path = tmp_path / "cert.pem"
-    key_path = tmp_path / "key.pem"
-    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
-
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
-        port = coordinator.sockets[0].getsockname()[1]
-        client_ctx = _client_ssl_context(cert_path)
-        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws:
-            await ws.send(json.dumps(
-                {"type": "register", "token": "wrong", "model": "m", "node_id": "node-a"}
-            ))
-            response = json.loads(await ws.recv())
-            assert response["type"] == "registration_rejected"
-            with pytest.raises(websockets.exceptions.ConnectionClosed):
-                await ws.recv()
-
-
-async def test_registration_with_missing_token_is_rejected(tmp_path):
-    cert_path = tmp_path / "cert.pem"
-    key_path = tmp_path / "key.pem"
-    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
-
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
-        port = coordinator.sockets[0].getsockname()[1]
-        client_ctx = _client_ssl_context(cert_path)
-        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws:
-            await ws.send(json.dumps({"type": "register", "model": "m", "node_id": "node-a"}))
-            response = json.loads(await ws.recv())
-            assert response["type"] == "registration_rejected"
-
-
 async def test_registered_node_appears_in_status_query(tmp_path):
     cert_path = tmp_path / "cert.pem"
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
         port = coordinator.sockets[0].getsockname()[1]
         client_ctx = _client_ssl_context(cert_path)
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as node_ws:
@@ -195,6 +194,8 @@ async def test_registered_node_appears_in_status_query(tmp_path):
                         "node_id": "node-a",
                         "model": "Qwen/Qwen2.5-7B-Instruct",
                         "fingerprint": crypto.fingerprint(public_key),
+                        "identity": "octocat",
+                        "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0},
                     }],
                 }
 
@@ -204,7 +205,9 @@ async def test_disconnected_node_is_removed_from_registry(tmp_path):
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
         port = coordinator.sockets[0].getsockname()[1]
         client_ctx = _client_ssl_context(cert_path)
         node_ws = await websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx)
@@ -225,7 +228,9 @@ async def test_duplicate_public_key_replaces_and_closes_old_connection(tmp_path)
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
         port = coordinator.sockets[0].getsockname()[1]
         client_ctx = _client_ssl_context(cert_path)
         old_ws = await websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx)
@@ -233,15 +238,16 @@ async def test_duplicate_public_key_replaces_and_closes_old_connection(tmp_path)
         public_key = crypto.public_key_b64(private_key)
         signature = crypto.sign_public_key(private_key)
         await old_ws.send(json.dumps({
-            "type": "register", "token": "secret-token", "model": "model-a",
-            "node_id": "node-a", "public_key": public_key, "signature": signature,
+            "type": "register", "model": "model-a", "node_id": "node-a",
+            "public_key": public_key, "signature": signature,
+            "github_token": "valid-github-token",
         }))
         await old_ws.recv()
 
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as new_ws:
             await new_ws.send(json.dumps({
-                "type": "register", "token": "secret-token", "model": "model-b",
-                "node_id": "node-a", "public_key": public_key, "signature": signature,
+                "type": "register", "model": "model-b", "node_id": "node-a",
+                "public_key": public_key, "signature": signature,
             }))
             await new_ws.recv()
 
@@ -252,7 +258,13 @@ async def test_duplicate_public_key_replaces_and_closes_old_connection(tmp_path)
                 await status_ws.send(json.dumps({"type": "status_query", "token": "secret-token"}))
                 response = json.loads(await status_ws.recv())
                 assert response["nodes"] == [
-                    {"node_id": "node-a", "model": "model-b", "fingerprint": crypto.fingerprint(public_key)}
+                    {
+                        "node_id": "node-a",
+                        "model": "model-b",
+                        "fingerprint": crypto.fingerprint(public_key),
+                        "identity": "octocat",
+                        "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0},
+                    }
                 ]
 
 
@@ -266,7 +278,9 @@ async def test_reregistration_with_non_canonical_public_key_spelling_is_treated_
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
         port = coordinator.sockets[0].getsockname()[1]
         client_ctx = _client_ssl_context(cert_path)
 
@@ -278,14 +292,15 @@ async def test_reregistration_with_non_canonical_public_key_spelling_is_treated_
 
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws_first:
             await ws_first.send(json.dumps({
-                "type": "register", "token": "secret-token", "model": "model-a",
-                "node_id": "node-a", "public_key": canonical_public_key, "signature": signature,
+                "type": "register", "model": "model-a", "node_id": "node-a",
+                "public_key": canonical_public_key, "signature": signature,
+                "github_token": "valid-github-token",
             }))
             await ws_first.recv()
 
             async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws_second:
                 await ws_second.send(json.dumps({
-                    "type": "register", "token": "secret-token", "model": "model-b",
+                    "type": "register", "model": "model-b",
                     "node_id": "node-a", "public_key": non_canonical_public_key, "signature": signature,
                 }))
                 await ws_second.recv()
@@ -298,6 +313,8 @@ async def test_reregistration_with_non_canonical_public_key_spelling_is_treated_
                             "node_id": "node-a",
                             "model": "model-b",
                             "fingerprint": crypto.fingerprint(canonical_public_key),
+                            "identity": "octocat",
+                            "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0},
                         }
                     ]
 
@@ -307,7 +324,9 @@ async def test_different_public_keys_with_same_node_id_both_remain_registered(tm
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
         port = coordinator.sockets[0].getsockname()[1]
         client_ctx = _client_ssl_context(cert_path)
 
@@ -338,7 +357,9 @@ async def test_connection_with_no_message_is_closed_after_timeout(tmp_path, monk
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
         port = coordinator.sockets[0].getsockname()[1]
         client_ctx = _client_ssl_context(cert_path)
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws:
@@ -351,7 +372,9 @@ async def test_registration_with_non_dict_json_is_closed_not_crashed(tmp_path):
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
         port = coordinator.sockets[0].getsockname()[1]
         client_ctx = _client_ssl_context(cert_path)
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws:
@@ -366,33 +389,19 @@ async def test_registration_with_non_dict_json_is_closed_not_crashed(tmp_path):
             assert response == {"type": "status", "nodes": []}
 
 
-async def test_registration_with_null_token_is_rejected_not_crashed(tmp_path):
-    cert_path = tmp_path / "cert.pem"
-    key_path = tmp_path / "key.pem"
-    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
-
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
-        port = coordinator.sockets[0].getsockname()[1]
-        client_ctx = _client_ssl_context(cert_path)
-        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws:
-            await ws.send(json.dumps(
-                {"type": "register", "token": None, "model": "m", "node_id": "node-a"}
-            ))
-            response = json.loads(await ws.recv())
-            assert response["type"] == "registration_rejected"
-
-
 async def test_registration_missing_public_key_or_signature_is_rejected(tmp_path):
     cert_path = tmp_path / "cert.pem"
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
         port = coordinator.sockets[0].getsockname()[1]
         client_ctx = _client_ssl_context(cert_path)
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws:
             await ws.send(json.dumps(
-                {"type": "register", "token": "secret-token", "model": "m", "node_id": "node-a"}
+                {"type": "register", "model": "m", "node_id": "node-a"}
             ))
             response = json.loads(await ws.recv())
             assert response == {
@@ -406,14 +415,16 @@ async def test_registration_with_invalid_signature_is_rejected(tmp_path):
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
         port = coordinator.sockets[0].getsockname()[1]
         client_ctx = _client_ssl_context(cert_path)
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws:
             key_a = crypto.generate_keypair()
             key_b = crypto.generate_keypair()
             await ws.send(json.dumps({
-                "type": "register", "token": "secret-token", "model": "m", "node_id": "node-a",
+                "type": "register", "model": "m", "node_id": "node-a",
                 "public_key": crypto.public_key_b64(key_a),
                 "signature": crypto.sign_public_key(key_b),  # signed by the WRONG key
             }))
@@ -423,12 +434,214 @@ async def test_registration_with_invalid_signature_is_rejected(tmp_path):
                 await ws.recv()
 
 
+async def test_registration_new_key_without_github_token_is_rejected(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws:
+            payload, _ = _register_payload("node-a", "m", github_token=None)
+            await ws.send(json.dumps(payload))
+            response = json.loads(await ws.recv())
+            assert response == {
+                "type": "registration_rejected",
+                "reason": "github_token is required for first-time registration",
+            }
+            with pytest.raises(websockets.exceptions.ConnectionClosed):
+                await ws.recv()
+
+
+async def test_registration_new_key_with_invalid_github_token_is_rejected(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws:
+            payload, _ = _register_payload("node-a", "m", github_token="bad-github-token")
+            await ws.send(json.dumps(payload))
+            response = json.loads(await ws.recv())
+            assert response == {
+                "type": "registration_rejected",
+                "reason": "invalid or expired GitHub token",
+            }
+            with pytest.raises(websockets.exceptions.ConnectionClosed):
+                await ws.recv()
+
+
+async def test_registration_new_key_with_github_unreachable_is_rejected(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws:
+            payload, _ = _register_payload("node-a", "m", github_token="unreachable-github-token")
+            await ws.send(json.dumps(payload))
+            response = json.loads(await ws.recv())
+            assert response == {
+                "type": "registration_rejected",
+                "reason": "could not reach GitHub to verify identity, try again",
+            }
+            with pytest.raises(websockets.exceptions.ConnectionClosed):
+                await ws.recv()
+
+
+async def test_registration_reconnect_with_known_key_needs_no_github_token(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+
+        private_key = crypto.generate_keypair()
+        public_key = crypto.public_key_b64(private_key)
+        signature = crypto.sign_public_key(private_key)
+
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as first_ws:
+            await first_ws.send(json.dumps({
+                "type": "register", "model": "m", "node_id": "node-a",
+                "public_key": public_key, "signature": signature,
+                "github_token": "valid-github-token",
+            }))
+            response = json.loads(await first_ws.recv())
+            assert response == {"type": "registered"}
+
+        # Reconnect with the SAME key and NO github_token at all — must
+        # still succeed, since the identity is already bound.
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as second_ws:
+            await second_ws.send(json.dumps({
+                "type": "register", "model": "m", "node_id": "node-a",
+                "public_key": public_key, "signature": signature,
+            }))
+            response = json.loads(await second_ws.recv())
+            assert response == {"type": "registered"}
+
+async def test_registration_rejected_when_identity_cap_reached(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token",
+        identity_verifier=_fake_identity_verifier, per_identity_cap=1,
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as first_ws:
+            payload, _ = _register_payload("node-a", "m")
+            await first_ws.send(json.dumps(payload))
+            response = json.loads(await first_ws.recv())
+            assert response == {"type": "registered"}
+
+            async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as second_ws:
+                # A DIFFERENT key, same fake identity ("octocat") — the
+                # cap of 1 is already occupied by the first connection.
+                payload, _ = _register_payload("node-b", "m")
+                await second_ws.send(json.dumps(payload))
+                response = json.loads(await second_ws.recv())
+                assert response == {
+                    "type": "registration_rejected",
+                    "reason": "identity has reached the maximum of 1 registered nodes",
+                }
+                with pytest.raises(websockets.exceptions.ConnectionClosed):
+                    await second_ws.recv()
+
+
+async def test_registration_succeeds_after_identity_cap_slot_freed_by_disconnect(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token",
+        identity_verifier=_fake_identity_verifier, per_identity_cap=1,
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+
+        first_ws = await websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx)
+        payload, _ = _register_payload("node-a", "m")
+        await first_ws.send(json.dumps(payload))
+        await first_ws.recv()
+
+        await first_ws.close()
+        await asyncio.sleep(0.2)  # let the coordinator notice the disconnect
+
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as second_ws:
+            payload, _ = _register_payload("node-b", "m")
+            await second_ws.send(json.dumps(payload))
+            response = json.loads(await second_ws.recv())
+            assert response == {"type": "registered"}
+
+
+async def test_registration_reconnect_of_existing_key_not_blocked_by_identity_cap(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token",
+        identity_verifier=_fake_identity_verifier, per_identity_cap=1,
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+
+        private_key = crypto.generate_keypair()
+        public_key = crypto.public_key_b64(private_key)
+        signature = crypto.sign_public_key(private_key)
+
+        old_ws = await websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx)
+        await old_ws.send(json.dumps({
+            "type": "register", "model": "m", "node_id": "node-a",
+            "public_key": public_key, "signature": signature,
+            "github_token": "valid-github-token",
+        }))
+        await old_ws.recv()
+
+        # Register AGAIN under the SAME key while old_ws is still open and
+        # still occupying the (only) cap slot — the cap must not block
+        # this, since it's the same key re-registering (a reconnect), not
+        # a new one. If the exemption were broken, this would be rejected
+        # with "identity has reached the maximum of 1 registered nodes"
+        # instead of succeeding.
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as new_ws:
+            await new_ws.send(json.dumps({
+                "type": "register", "model": "m", "node_id": "node-a",
+                "public_key": public_key, "signature": signature,
+            }))
+            response = json.loads(await new_ws.recv())
+            assert response == {"type": "registered"}
+
+        await old_ws.close()
+
+
 async def test_duplicate_node_id_registration_acks_promptly_even_if_old_connection_is_unresponsive(tmp_path):
     cert_path = tmp_path / "cert.pem"
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
         port = coordinator.sockets[0].getsockname()[1]
         client_ctx = _client_ssl_context(cert_path)
         old_ws = await websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx)
@@ -436,8 +649,9 @@ async def test_duplicate_node_id_registration_acks_promptly_even_if_old_connecti
         public_key = crypto.public_key_b64(private_key)
         signature = crypto.sign_public_key(private_key)
         await old_ws.send(json.dumps({
-            "type": "register", "token": "secret-token", "model": "model-a",
-            "node_id": "node-a", "public_key": public_key, "signature": signature,
+            "type": "register", "model": "model-a", "node_id": "node-a",
+            "public_key": public_key, "signature": signature,
+            "github_token": "valid-github-token",
         }))
         await old_ws.recv()
         # Simulate a zombie connection: stop reading, so it can't complete
@@ -446,8 +660,9 @@ async def test_duplicate_node_id_registration_acks_promptly_even_if_old_connecti
 
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as new_ws:
             await new_ws.send(json.dumps({
-                "type": "register", "token": "secret-token", "model": "model-b",
-                "node_id": "node-a", "public_key": public_key, "signature": signature,
+                "type": "register", "model": "model-b", "node_id": "node-a",
+                "public_key": public_key, "signature": signature,
+                "github_token": "valid-github-token",
             }))
             start = time.monotonic()
             response = json.loads(await asyncio.wait_for(new_ws.recv(), timeout=3.0))
@@ -466,7 +681,9 @@ async def test_silently_unresponsive_node_is_dropped_within_ping_timeout_window(
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
         port = coordinator.sockets[0].getsockname()[1]
         client_ctx = _client_ssl_context(cert_path)
         node_ws = await websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx)
@@ -480,7 +697,13 @@ async def test_silently_unresponsive_node_is_dropped_within_ping_timeout_window(
             response = json.loads(await status_ws.recv())
             assert response == {
                 "type": "status",
-                "nodes": [{"node_id": "node-a", "model": "m", "fingerprint": crypto.fingerprint(public_key)}],
+                "nodes": [{
+                    "node_id": "node-a",
+                    "model": "m",
+                    "fingerprint": crypto.fingerprint(public_key),
+                    "identity": "octocat",
+                    "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0},
+                }],
             }
 
         # Simulate the node going silent (network partition, frozen process):
@@ -557,7 +780,9 @@ async def test_complete_request_routes_to_registered_node_and_returns_result(tmp
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
         port = coordinator.sockets[0].getsockname()[1]
         client_ctx = _client_ssl_context(cert_path)
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as node_ws:
@@ -583,7 +808,9 @@ async def test_complete_request_with_no_matching_node_returns_error(tmp_path):
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
         port = coordinator.sockets[0].getsockname()[1]
         client_ctx = _client_ssl_context(cert_path)
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws:
@@ -610,7 +837,9 @@ async def test_complete_request_with_no_healthy_node_fails_fast_with_no_retry(tm
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
         port = coordinator.sockets[0].getsockname()[1]
         client_ctx = _client_ssl_context(cert_path)
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws:
@@ -636,7 +865,9 @@ async def test_complete_request_with_wrong_token_is_closed_without_reply(tmp_pat
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
         port = coordinator.sockets[0].getsockname()[1]
         client_ctx = _client_ssl_context(cert_path)
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws:
@@ -652,7 +883,9 @@ async def test_complete_request_with_missing_prompt_returns_error(tmp_path):
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
         port = coordinator.sockets[0].getsockname()[1]
         client_ctx = _client_ssl_context(cert_path)
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws:
@@ -668,7 +901,9 @@ async def test_complete_request_node_reports_failure_is_relayed_to_client(tmp_pa
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
         port = coordinator.sockets[0].getsockname()[1]
         client_ctx = _client_ssl_context(cert_path)
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as node_ws:
@@ -689,13 +924,81 @@ async def test_complete_request_node_reports_failure_is_relayed_to_client(tmp_pa
             node_task.cancel()
 
 
+async def test_complete_request_success_increments_completion_counter(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as node_ws:
+            payload, public_key = _register_payload("node-a", "m")
+            await node_ws.send(json.dumps(payload))
+            await node_ws.recv()
+            node_task = asyncio.create_task(_run_fake_node(
+                node_ws, lambda msg: {"type": "complete_result", "text": f"echo: {msg['prompt']}"}
+            ))
+
+            async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws:
+                await client_ws.send(json.dumps(
+                    {"type": "complete", "token": "secret-token", "model": "m", "prompt": "hi"}
+                ))
+                await client_ws.recv()
+
+            node_task.cancel()
+
+            async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as status_ws:
+                await status_ws.send(json.dumps({"type": "status_query", "token": "secret-token"}))
+                response = json.loads(await status_ws.recv())
+                assert response["nodes"][0]["reputation"] == {
+                    "completions": 1, "timeouts": 0, "crashes": 0, "disconnects": 0,
+                }
+
+
+async def test_complete_request_node_failure_increments_crash_counter(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as node_ws:
+            payload, public_key = _register_payload("node-a", "m")
+            await node_ws.send(json.dumps(payload))
+            await node_ws.recv()
+            node_task = asyncio.create_task(_run_fake_node(
+                node_ws, lambda msg: {"type": "complete_error", "reason": "vLLM exploded"}
+            ))
+
+            async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws:
+                await client_ws.send(json.dumps(
+                    {"type": "complete", "token": "secret-token", "model": "m", "prompt": "hi"}
+                ))
+                await client_ws.recv()
+
+            node_task.cancel()
+
+            async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as status_ws:
+                await status_ws.send(json.dumps({"type": "status_query", "token": "secret-token"}))
+                response = json.loads(await status_ws.recv())
+                assert response["nodes"][0]["reputation"]["crashes"] == 1
+
+
 async def test_complete_request_node_disconnect_mid_request_fails_fast(tmp_path, monkeypatch):
     monkeypatch.setattr(router, "NODE_COMPLETE_TIMEOUT_SECONDS", 30.0)
     cert_path = tmp_path / "cert.pem"
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
         port = coordinator.sockets[0].getsockname()[1]
         client_ctx = _client_ssl_context(cert_path)
         node_ws = await websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx)
@@ -725,6 +1028,41 @@ async def test_complete_request_node_disconnect_mid_request_fails_fast(tmp_path,
             )
 
 
+async def test_complete_request_timeout_increments_timeout_counter(tmp_path, monkeypatch):
+    monkeypatch.setattr(router, "NODE_COMPLETE_TIMEOUT_SECONDS", 0.2)
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as node_ws:
+            payload, public_key = _register_payload("node-a", "m")
+            await node_ws.send(json.dumps(payload))
+            await node_ws.recv()
+
+            async def receive_then_never_reply():
+                await node_ws.recv()
+
+            node_task = asyncio.create_task(receive_then_never_reply())
+
+            async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws:
+                await client_ws.send(json.dumps(
+                    {"type": "complete", "token": "secret-token", "model": "m", "prompt": "hi"}
+                ))
+                await client_ws.recv()
+
+            await node_task
+
+            async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as status_ws:
+                await status_ws.send(json.dumps({"type": "status_query", "token": "secret-token"}))
+                response = json.loads(await status_ws.recv())
+                assert response["nodes"][0]["reputation"]["timeouts"] == 1
+
+
 async def test_complete_request_client_disconnect_before_reply_does_not_crash_server(
     tmp_path, caplog
 ):
@@ -732,7 +1070,9 @@ async def test_complete_request_client_disconnect_before_reply_does_not_crash_se
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
         port = coordinator.sockets[0].getsockname()[1]
         client_ctx = _client_ssl_context(cert_path)
         node_ws = await websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx)
@@ -764,7 +1104,13 @@ async def test_complete_request_client_disconnect_before_reply_does_not_crash_se
             await status_ws.send(json.dumps({"type": "status_query", "token": "secret-token"}))
             response = json.loads(await status_ws.recv())
             assert response["nodes"] == [
-                {"node_id": "node-a", "model": "m", "fingerprint": crypto.fingerprint(public_key)}
+                {
+                    "node_id": "node-a",
+                    "model": "m",
+                    "fingerprint": crypto.fingerprint(public_key),
+                    "identity": "octocat",
+                    "reputation": {"completions": 1, "timeouts": 0, "crashes": 0, "disconnects": 0},
+                }
             ]
 
         await node_ws.close()
@@ -784,7 +1130,9 @@ async def test_superseded_node_connection_fails_only_its_own_pending_requests(tm
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
         port = coordinator.sockets[0].getsockname()[1]
         client_ctx = _client_ssl_context(cert_path)
 
@@ -793,8 +1141,9 @@ async def test_superseded_node_connection_fails_only_its_own_pending_requests(tm
         public_key = crypto.public_key_b64(private_key)
         signature = crypto.sign_public_key(private_key)
         await old_node_ws.send(json.dumps({
-            "type": "register", "token": "secret-token", "model": "m",
+            "type": "register", "model": "m",
             "node_id": "node-a", "public_key": public_key, "signature": signature,
+            "github_token": "valid-github-token",
         }))
         await old_node_ws.recv()
 
@@ -819,8 +1168,9 @@ async def test_superseded_node_connection_fails_only_its_own_pending_requests(tm
         # old_node_ws in the background.
         new_node_ws = await websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx)
         await new_node_ws.send(json.dumps({
-            "type": "register", "token": "secret-token", "model": "m",
+            "type": "register", "model": "m",
             "node_id": "node-a", "public_key": public_key, "signature": signature,
+            "github_token": "valid-github-token",
         }))
         await new_node_ws.recv()
 
@@ -853,12 +1203,61 @@ async def test_superseded_node_connection_fails_only_its_own_pending_requests(tm
         await old_client_ws.close()
 
 
+async def test_complete_request_disconnect_increments_disconnect_counter(tmp_path, monkeypatch):
+    monkeypatch.setattr(router, "NODE_COMPLETE_TIMEOUT_SECONDS", 30.0)
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        node_ws = await websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx)
+        payload, public_key = _register_payload("node-a", "m")
+        await node_ws.send(json.dumps(payload))
+        await node_ws.recv()
+
+        async def receive_then_never_reply():
+            await node_ws.recv()
+
+        node_task = asyncio.create_task(receive_then_never_reply())
+
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws:
+            await client_ws.send(json.dumps(
+                {"type": "complete", "token": "secret-token", "model": "m", "prompt": "hi"}
+            ))
+            await node_task  # the node has received the routed request
+            await node_ws.close()  # simulate the node dying mid-request
+            await client_ws.recv()
+
+        # The disconnected connection's Node entry is gone from _nodes
+        # (issue #11's self-heal), so list_nodes() won't show it directly.
+        # Confirm the counter survived by re-registering the SAME key —
+        # if record_disconnect ran, the count carries into this fresh
+        # connection (Task 1's persistence-across-reconnect property).
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as reconnect_ws:
+            await reconnect_ws.send(json.dumps({
+                "type": "register", "model": "m", "node_id": "node-a",
+                "public_key": payload["public_key"], "signature": payload["signature"],
+            }))
+            await reconnect_ws.recv()
+
+            async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as status_ws:
+                await status_ws.send(json.dumps({"type": "status_query", "token": "secret-token"}))
+                response = json.loads(await status_ws.recv())
+                assert response["nodes"][0]["reputation"]["disconnects"] == 1
+
+
 async def test_concurrent_complete_requests_to_same_node_get_correct_replies(tmp_path):
     cert_path = tmp_path / "cert.pem"
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
         port = coordinator.sockets[0].getsockname()[1]
         client_ctx = _client_ssl_context(cert_path)
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as node_ws:
@@ -903,7 +1302,9 @@ async def test_complete_request_round_robins_across_two_healthy_nodes(tmp_path):
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
-    async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
         port = coordinator.sockets[0].getsockname()[1]
         client_ctx = _client_ssl_context(cert_path)
 
@@ -974,7 +1375,13 @@ async def test_complete_request_fails_over_to_healthy_node_when_first_pick_is_de
     assert json.loads(client_ws.sent[0]) == {"type": "complete_result", "text": "answer from node-b"}
     # node-a's dead connection must have been self-healed out of the registry.
     assert registry.list_nodes() == [
-        {"node_id": "node-b", "model": "m", "fingerprint": hashlib.sha256(b"b" * 32).hexdigest()[:12]}
+        {
+            "node_id": "node-b",
+            "model": "m",
+            "fingerprint": hashlib.sha256(b"b" * 32).hexdigest()[:12],
+            "identity": None,
+            "reputation": {"completions": 1, "timeouts": 0, "crashes": 0, "disconnects": 0},
+        }
     ]
 
 
@@ -996,8 +1403,18 @@ async def test_complete_request_does_not_fail_over_on_timeout(monkeypatch):
     assert other_ws.sent == []  # node-b was never contacted
     # A timeout isn't treated as a dead node — node-a stays registered.
     assert registry.list_nodes() == [
-        {"node_id": "node-a", "model": "m", "fingerprint": hashlib.sha256(b"a" * 32).hexdigest()[:12]},
-        {"node_id": "node-b", "model": "m", "fingerprint": hashlib.sha256(b"b" * 32).hexdigest()[:12]},
+        {
+            "node_id": "node-a", "model": "m",
+            "fingerprint": hashlib.sha256(b"a" * 32).hexdigest()[:12],
+            "identity": None,
+            "reputation": {"completions": 0, "timeouts": 1, "crashes": 0, "disconnects": 0},
+        },
+        {
+            "node_id": "node-b", "model": "m",
+            "fingerprint": hashlib.sha256(b"b" * 32).hexdigest()[:12],
+            "identity": None,
+            "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0},
+        },
     ]
 
 
@@ -1016,3 +1433,151 @@ async def test_complete_request_returns_error_when_every_node_is_dead():
     response = json.loads(client_ws.sent[0])
     assert response["type"] == "complete_error"
     assert registry.list_nodes() == []
+
+
+async def test_registration_rejected_when_identity_is_banned(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as first_ws:
+            payload, _ = _register_payload("node-a", "m")
+            await first_ws.send(json.dumps(payload))
+            response = json.loads(await first_ws.recv())
+            assert response == {"type": "registered"}
+
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ban_ws:
+            await ban_ws.send(json.dumps(
+                {"type": "ban_identity", "token": "secret-token", "identity": "octocat"}
+            ))
+            await ban_ws.recv()
+
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as second_ws:
+            payload, _ = _register_payload("node-b", "m")
+            await second_ws.send(json.dumps(payload))
+            response = json.loads(await second_ws.recv())
+            assert response == {
+                "type": "registration_rejected",
+                "reason": "this identity has been banned by the operator",
+            }
+            with pytest.raises(websockets.exceptions.ConnectionClosed):
+                await second_ws.recv()
+
+
+async def test_ban_disconnects_currently_registered_node(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+
+        node_ws = await websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx)
+        payload, _ = _register_payload("node-a", "m")
+        await node_ws.send(json.dumps(payload))
+        await node_ws.recv()
+
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ban_ws:
+            await ban_ws.send(json.dumps(
+                {"type": "ban_identity", "token": "secret-token", "identity": "octocat"}
+            ))
+            response = json.loads(await ban_ws.recv())
+            assert response == {
+                "type": "banned", "identity": "octocat", "disconnected_count": 1,
+            }
+
+        with pytest.raises(websockets.exceptions.ConnectionClosed):
+            await node_ws.recv()
+
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as status_ws:
+            await status_ws.send(json.dumps({"type": "status_query", "token": "secret-token"}))
+            response = json.loads(await status_ws.recv())
+            assert response["nodes"] == []
+
+
+async def test_ban_request_with_wrong_token_is_closed_without_reply(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws:
+            await ws.send(json.dumps(
+                {"type": "ban_identity", "token": "wrong", "identity": "octocat"}
+            ))
+            with pytest.raises(websockets.exceptions.ConnectionClosed):
+                await ws.recv()
+
+
+async def test_ban_request_for_unknown_identity_returns_ban_failed(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ws:
+            await ws.send(json.dumps(
+                {"type": "ban_identity", "token": "secret-token", "identity": "nobody"}
+            ))
+            response = json.loads(await ws.recv())
+            assert response == {
+                "type": "ban_failed",
+                "reason": "no known identity bound to GitHub login 'nobody'",
+            }
+            with pytest.raises(websockets.exceptions.ConnectionClosed):
+                await ws.recv()
+
+
+async def test_ban_is_checked_before_identity_cap(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token",
+        identity_verifier=_fake_identity_verifier, per_identity_cap=1,
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as first_ws:
+            payload, _ = _register_payload("node-a", "m")
+            await first_ws.send(json.dumps(payload))
+            await first_ws.recv()
+
+            async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as ban_ws:
+                await ban_ws.send(json.dumps(
+                    {"type": "ban_identity", "token": "secret-token", "identity": "octocat"}
+                ))
+                await ban_ws.recv()
+
+            # first_ws is still open here, so the identity is simultaneously
+            # AT its cap of 1 and banned — a NEW key for that same identity
+            # must see the ban rejection, not the cap rejection. If ban
+            # weren't checked first, this would instead see
+            # "identity has reached the maximum of 1 registered nodes".
+            async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as second_ws:
+                payload, _ = _register_payload("node-b", "m")
+                await second_ws.send(json.dumps(payload))
+                response = json.loads(await second_ws.recv())
+                assert response == {
+                    "type": "registration_rejected",
+                    "reason": "this identity has been banned by the operator",
+                }

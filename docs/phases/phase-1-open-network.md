@@ -1,6 +1,6 @@
 # Phase 1 — Open Network
 
-Status: Brainstormed and PRD published ([issue #31](https://github.com/Zenkai-Dynamics/Mycelium/issues/31)) — not yet implemented
+Status: Built ([issue #31](https://github.com/Zenkai-Dynamics/Mycelium/issues/31))
 Depends on: [Phase 0](phase-0-foundation.md) working end to end
 Related: [Phase 1 design rationale](../superpowers/specs/2026-08-23-phase-1-open-network-design.md)
 
@@ -63,7 +63,10 @@ LLM per request. This is the phase where trust stops being assumed.
   website or new architectural component.
 
 See [the design doc](../superpowers/specs/2026-08-23-phase-1-open-network-design.md)
-for the full reasoning behind each decision above, and
+for the full reasoning behind each decision above,
+[OPERATIONS.md](../OPERATIONS.md#what-this-network-does-not-protect-against)
+for the operator-facing disclosure of the prompt-privacy and
+content-verification risks specifically, and
 [issue #31](https://github.com/Zenkai-Dynamics/Mycelium/issues/31) for the
 PRD (problem statement, user stories, implementation/testing decisions,
 explicit out-of-scope list).

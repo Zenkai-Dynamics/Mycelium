@@ -17,13 +17,21 @@ from __future__ import annotations
 import asyncio
 import json
 import ssl
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 import websockets
 
 from mycelium import crypto
-from mycelium.coordinator import router
-from mycelium.coordinator.registry import Node, NodeRegistry
+from mycelium.coordinator import github_identity, router
+from mycelium.coordinator.registry import (
+    IdentityBanned,
+    IdentityCapReached,
+    MissingGithubToken,
+    Node,
+    NodeRegistry,
+    UnknownIdentity,
+)
 
 # These three also double as #9's node-liveness mechanism: a silent node
 # (no pong within PING_TIMEOUT_SECONDS of a ping) has the library start a
@@ -37,7 +45,14 @@ from mycelium.coordinator.registry import Node, NodeRegistry
 PING_INTERVAL_SECONDS = 20
 PING_TIMEOUT_SECONDS = 20
 CLOSE_TIMEOUT_SECONDS = 10
-FIRST_MESSAGE_TIMEOUT_SECONDS = 10.0
+# Bumped from 10.0 (issue #39): registration can now involve a GitHub API
+# call (NodeRegistry.resolve_identity), bounded at
+# github_identity.VERIFY_TIMEOUT_SECONDS (5s). Kept numerically equal to
+# registration.REGISTRATION_TIMEOUT_SECONDS by convention (see
+# test_server_and_registration_agree_on_timeout_settings in
+# tests/test_integration.py) — this constant's own job (bounding time to
+# receive the first message at all) doesn't itself depend on GitHub.
+FIRST_MESSAGE_TIMEOUT_SECONDS = 15.0
 
 # Fire-and-forget cleanup tasks (closing a superseded connection) must keep
 # a reference somewhere, or asyncio may garbage-collect them mid-execution.
@@ -88,6 +103,10 @@ async def _handle_node(websocket, registry: NodeRegistry) -> None:
         await _handle_registration(websocket, registry, message)
         return
 
+    if message_type == "ban_identity":
+        await _handle_ban_request(websocket, registry, message)
+        return
+
     if message_type == "complete":
         await _handle_complete_request(websocket, registry, message)
         return
@@ -103,7 +122,9 @@ async def _handle_complete_request(websocket, registry: NodeRegistry, message: d
     registry and retry a different healthy node before giving up — see
     the design doc for issue #11. A timeout or a node-reported failure is
     not retried: the node might still be working, and silently re-running
-    the same prompt on a second node risks double-executing it."""
+    the same prompt on a second node risks double-executing it. Each
+    outcome (completion/timeout/crash/disconnect) is recorded against the
+    node that produced it — see the design doc for issue #36."""
     if not registry.check_token(message.get("token")):
         await websocket.close()
         return
@@ -119,6 +140,13 @@ async def _handle_complete_request(websocket, registry: NodeRegistry, message: d
             return
         await websocket.close()
         return
+
+    async def reject(reason: str) -> None:
+        try:
+            await websocket.send(json.dumps({"type": "complete_error", "reason": reason}))
+        except websockets.exceptions.ConnectionClosed:
+            return
+        await websocket.close()
 
     tried: set[str] = set()
     while True:
@@ -140,17 +168,23 @@ async def _handle_complete_request(websocket, registry: NodeRegistry, message: d
             # The picked node is actually dead — self-heal the registry
             # right away (don't wait for #9's ping/pong timeout) and try a
             # different healthy node instead of failing the request.
+            registry.record_disconnect(node.public_key)
             registry.unregister(node.public_key, node.websocket)
             tried.add(node.public_key)
             continue
+        except router.NodeTimeoutError as exc:
+            registry.record_timeout(node.public_key)
+            await reject(str(exc))
+            return
+        except router.NodeError as exc:
+            registry.record_crash(node.public_key)
+            await reject(str(exc))
+            return
         except router.RoutingError as exc:
-            try:
-                await websocket.send(json.dumps({"type": "complete_error", "reason": str(exc)}))
-            except websockets.exceptions.ConnectionClosed:
-                return
-            await websocket.close()
+            await reject(str(exc))
             return
         else:
+            registry.record_completion(node.public_key)
             break
 
     try:
@@ -189,14 +223,45 @@ async def _handle_status_query(websocket, registry: NodeRegistry, message: dict)
     await websocket.close()
 
 
-async def _handle_registration(websocket, registry: NodeRegistry, message: dict) -> None:
+async def _handle_ban_request(websocket, registry: NodeRegistry, message: dict) -> None:
+    """An operator's `mycelium-coordinator-ban` command: authenticate,
+    ban the named GitHub login, then disconnect any currently-registered
+    nodes under that identity — see the design doc for issue #37.
+    Disconnecting reuses the same _close_in_background(...) path
+    _handle_registration already uses for a superseded connection; each
+    disconnected node's own long-lived _handle_registration task (still
+    running for that node's original connection) notices
+    ConnectionClosed and runs its existing finally-block cleanup
+    (registry.unregister + failing any pending routed requests)."""
     if not registry.check_token(message.get("token")):
+        await websocket.close()
+        return
+
+    identity = message.get("identity")
+    if not identity:
         await websocket.send(json.dumps(
-            {"type": "registration_rejected", "reason": "invalid or missing token"}
+            {"type": "ban_failed", "reason": "identity is required"}
         ))
         await websocket.close()
         return
 
+    try:
+        disconnected_nodes = registry.ban_identity(identity)
+    except UnknownIdentity as exc:
+        await websocket.send(json.dumps({"type": "ban_failed", "reason": str(exc)}))
+        await websocket.close()
+        return
+
+    for node in disconnected_nodes:
+        _close_in_background(node.websocket)
+
+    await websocket.send(json.dumps({
+        "type": "banned", "identity": identity, "disconnected_count": len(disconnected_nodes),
+    }))
+    await websocket.close()
+
+
+async def _handle_registration(websocket, registry: NodeRegistry, message: dict) -> None:
     node_id = message.get("node_id")
     model = message.get("model")
     if not node_id or not model:
@@ -223,9 +288,54 @@ async def _handle_registration(websocket, registry: NodeRegistry, message: dict)
         return
 
     # Collapse non-canonical base64 spellings of the same raw key to one
-    # string, so the registry's string-keyed dict can't be handed the same
-    # key twice under different spellings — see crypto.canonical_public_key.
+    # string, so the registry's string-keyed dicts can't be handed the
+    # same key twice under different spellings — see
+    # crypto.canonical_public_key.
     public_key = crypto.canonical_public_key(public_key)
+
+    try:
+        identity = await registry.resolve_identity(public_key, message.get("github_token"))
+    except MissingGithubToken:
+        await websocket.send(json.dumps({
+            "type": "registration_rejected",
+            "reason": "github_token is required for first-time registration",
+        }))
+        await websocket.close()
+        return
+    except github_identity.InvalidGithubToken:
+        await websocket.send(json.dumps({
+            "type": "registration_rejected",
+            "reason": "invalid or expired GitHub token",
+        }))
+        await websocket.close()
+        return
+    except github_identity.IdentityVerificationError:
+        await websocket.send(json.dumps({
+            "type": "registration_rejected",
+            "reason": "could not reach GitHub to verify identity, try again",
+        }))
+        await websocket.close()
+        return
+
+    try:
+        registry.enforce_not_banned(identity)
+    except IdentityBanned as exc:
+        await websocket.send(json.dumps({
+            "type": "registration_rejected",
+            "reason": str(exc),
+        }))
+        await websocket.close()
+        return
+
+    try:
+        registry.enforce_identity_cap(public_key, identity)
+    except IdentityCapReached as exc:
+        await websocket.send(json.dumps({
+            "type": "registration_rejected",
+            "reason": str(exc),
+        }))
+        await websocket.close()
+        return
 
     superseded = registry.register(public_key, node_id, model, websocket)
     # Captured once, right now — never re-fetched from the registry later.
@@ -270,14 +380,40 @@ def build_ssl_context(cert_path: Path, key_path: Path) -> ssl.SSLContext:
     return context
 
 
-def serve(host: str, port: int, cert_path: Path, key_path: Path, token: str):
+def serve(
+    host: str,
+    port: int,
+    cert_path: Path,
+    key_path: Path,
+    token: str,
+    identity_verifier: Callable[[str], Awaitable] | None = None,
+    per_identity_cap: int | None = None,
+):
     """Start the coordinator's node-facing WebSocket server.
+
+    identity_verifier overrides the real GitHub identity check (see
+    mycelium.coordinator.github_identity.verify_identity) — production
+    callers leave it unset; tests inject a fake so no test ever makes a
+    real network call to GitHub. See the design doc for issue #39.
+
+    per_identity_cap overrides NodeRegistry's default Sybil-resistance
+    cap (3) — production callers leave it unset unless the operator
+    configured a different value via mycelium-coordinator's
+    --per-identity-cap flag. See the design doc for issue #35. Resolved
+    to the literal default here (not passed through as None) because
+    NodeRegistry.__init__ takes an ordinary `int = 3` default, not a
+    None-accepting parameter — `None >= 3` would raise inside
+    enforce_identity_cap if passed through unconditionally.
 
     Returns whatever `websockets.serve` returns: awaitable to get a `Server`
     instance directly, or usable as `async with serve(...) as server:`.
     """
     ssl_context = build_ssl_context(cert_path, key_path)
-    registry = NodeRegistry(token)
+    registry = NodeRegistry(
+        token,
+        identity_verifier=identity_verifier,
+        per_identity_cap=per_identity_cap if per_identity_cap is not None else 3,
+    )
 
     async def handler(websocket):
         await _handle_node(websocket, registry)

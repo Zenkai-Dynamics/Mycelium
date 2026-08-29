@@ -6,7 +6,8 @@ This walks through actually **running** Mycelium end to end: standing up
 a coordinator, connecting a node to it, and sending a completion through
 as a client. It assumes you've already followed
 [SETUP.md](SETUP.md) to get `mycelium-coordinator`, `mycelium-node`,
-`mycelium-coordinator-status`, and `mycelium-client` installed.
+`mycelium-coordinator-status`, `mycelium-coordinator-ban`, and
+`mycelium-client` installed.
 
 If you just want to confirm a GPU node's vLLM stack works at all,
 without any coordinator involved, skip to
@@ -33,20 +34,25 @@ Client  →  Coordinator  →  Node agent  →  vLLM  →  response
 - **Client** — a one-shot request: connect, send one prompt, get one
   completion back, exit.
 
-Every connection is TLS, authenticated by one shared secret token (same
-token used by every node and every client) plus a self-signed
-certificate the coordinator generates once and that every node/client
-must have a local copy of. There's no CA — a copy of the coordinator's
-own cert file *is* the trust anchor (see
+Every connection is TLS; client connections (and the coordinator's own
+bootstrap) are additionally authenticated by one shared secret token, while
+a node's identity is its own self-generated keypair plus a one-time GitHub
+sign-in (see Step 1 and Step 3). All connections additionally use a
+self-signed certificate the coordinator generates once, which every
+node/client must have a local copy of. There's no CA — a copy of the
+coordinator's own cert file *is* the trust anchor (see
 ["The trust model in one paragraph"](#the-trust-model-in-one-paragraph)
 below).
 
 ## Step 1 — Create a shared token
 
-Anyone connecting — every node, every client — authenticates with the
-same secret token, compared with `hmac.compare_digest` (not sent as a
-CLI flag or environment variable; always a file). Generate one and put
-it somewhere only you can read:
+Every **client** request (and the coordinator's own bootstrap) authenticates
+with the same secret token, compared with `hmac.compare_digest` (not sent
+as a CLI flag or environment variable; always a file). **Nodes no longer
+use this token** (see Step 3) — as of issue #39, a node's identity is its
+own self-generated keypair plus a one-time GitHub sign-in, not a shared
+secret. Generate the client/coordinator token and put it somewhere only
+you can read:
 
 ```bash
 mkdir -p ~/.mycelium
@@ -54,10 +60,10 @@ openssl rand -hex 32 > ~/.mycelium/token
 chmod 600 ~/.mycelium/token
 ```
 
-Copy this same file (or its contents) to every node and every client
-machine — `scp ~/.mycelium/token <node-host>:~/.mycelium/token`, etc.
-Anyone who has it can register a node or submit completions, so treat it
-like a password.
+Copy this same file (or its contents) to every client machine —
+`scp ~/.mycelium/token <client-host>:~/.mycelium/token`, etc. Anyone who
+has it can submit completions **and ban any node's identity** (see
+Step 6), so treat it like a password.
 
 ## Step 2 — Start the coordinator
 
@@ -78,6 +84,11 @@ mycelium-coordinator --token-file ~/.mycelium/token --cert-san-ip <coordinator-i
 - Default listen address: `0.0.0.0:8765`. Override with `--host`/`--port`.
 - Default cert/key paths: `~/.mycelium/coordinator-cert.pem` /
   `coordinator-key.pem`. Override with `--cert-file`/`--key-file`.
+- Per-identity node cap (issue #35): each bound GitHub identity can have
+  at most 3 nodes registered at once by default — override with
+  `--per-identity-cap`. A registration beyond the cap is rejected with a
+  clear reason distinct from an invalid GitHub token; a node
+  disconnecting frees its slot for that identity immediately.
 
 On success you'll see:
 
@@ -100,15 +111,52 @@ scp ~/.mycelium/coordinator-cert.pem <node-host>:~/.mycelium/coordinator-cert.pe
 ## Step 3 — Start a node
 
 On a GPU machine, with the `node` extra installed (see
-[SETUP.md](SETUP.md)'s Node/GPU setup section) and both the token file
-and the coordinator's cert copied over:
+[SETUP.md](SETUP.md)'s Node/GPU setup section) and the coordinator's cert
+copied over, a node authenticates with its own self-generated keypair
+plus a one-time GitHub sign-in (issue #39) — not the shared token from
+Step 1.
+
+**GitHub sign-in for the node's first registration.** The first time this
+node's keypair registers, `mycelium-node` drives GitHub's OAuth device
+flow itself — no browser or open inbound port needed on the node:
 
 ```bash
 mycelium-node \
   --coordinator-url wss://<coordinator-ip>:8765 \
-  --coordinator-cert ~/.mycelium/coordinator-cert.pem \
-  --token-file ~/.mycelium/token
+  --coordinator-cert ~/.mycelium/coordinator-cert.pem
 ```
+
+```
+First copy your one-time code: ABCD-1234
+Then visit: https://github.com/login/device and enter it
+```
+
+Copy the code, open that URL on any device with a browser (not
+necessarily the node itself), and authorize it. `mycelium-node` polls in
+the background and continues automatically once you do — no restart, no
+extra flag. The resulting token is cached to `~/.mycelium/github-token`
+(`chmod 600`), so this only happens once per node; every later run (or
+reconnect) reuses the cached token silently. `--github-token-file` points
+at a token file you supply yourself — it never becomes a device-flow
+cache location itself; if it's missing, `mycelium-node` exits immediately
+rather than falling back to the interactive flow.
+
+Prefer to supply a token yourself instead of the interactive flow — e.g.
+`gh auth token` if you have the GitHub CLI authenticated, or a Personal
+Access Token from `github.com/settings/tokens` (no scopes are required,
+since only `GET /user` is called)? Save it to that same path yourself
+before starting the node, or point `--github-token-file` at wherever you
+saved it:
+
+```bash
+echo "<your-github-token>" > ~/.mycelium/github-token
+chmod 600 ~/.mycelium/github-token
+```
+
+Either way, this is only needed the **first** time this node's keypair
+registers — the coordinator remembers the binding for as long as it keeps
+running (see the limitation below), and a reconnecting node with an
+already-known public key is accepted without it.
 
 The node agent shells out to a bare `vllm` command (not a path inside
 its own venv) — make sure the venv's `bin/` directory is on `PATH`
@@ -129,9 +177,12 @@ What happens:
    against the pinned `--coordinator-cert`.
 3. Generates (on first run only — persisted afterward) an Ed25519
    keypair at `~/.mycelium/node-key.pem` by default, override with
-   `--node-key-file`. Sends a registration message (token + model +
-   node ID + public key + a signature proving it holds the matching
-   private key) and waits for the coordinator to ack it.
+   `--node-key-file`. If this is the key's first registration, obtains a
+   GitHub token — via the cached/hand-supplied `--github-token-file` if
+   one exists, otherwise the interactive device flow above (cached to
+   that same path afterward). Sends a registration message (model + node
+   ID + public key + a signature proving it holds the matching private
+   key, plus that GitHub token) and waits for the coordinator to ack it.
 4. Holds the connection open, handling completion requests the
    coordinator routes to it, until the connection drops — then
    reconnects automatically with exponential backoff (1s, doubling,
@@ -169,6 +220,27 @@ Each co-located node also needs its own `--node-key-file` — the default
 machine would otherwise silently load the *same* keypair and register as
 one indistinguishable identity to the coordinator.
 
+**A coordinator restart forgets every node's GitHub binding** (issue
+#39) — bindings are in-memory only, exactly like the rest of the
+coordinator's registry. Combined with GitHub OAuth's default 8-hour
+access-token expiry, a volunteer's cached `~/.mycelium/github-token` is
+quite likely already expired by the time any coordinator restart
+happens, so a restart can force a fresh GitHub sign-in — `mycelium-node`
+retries registration with backoff but never auto-detects or auto-clears
+a stale cached token; delete `~/.mycelium/github-token` yourself to
+force the device flow to run again. Whoever registers Mycelium's GitHub
+App should turn *off* "Expire user access tokens" in that app's settings
+to avoid this for real deployments.
+
+**`mycelium-node`'s GitHub App `client_id` ships as a placeholder** until
+the operator registers a real GitHub App (device flow enabled, "Expire
+user access tokens" off) and swaps `CLIENT_ID` in
+`src/mycelium/node/github_device_flow.py`. Running the interactive
+device flow before that swap fails immediately with `error:
+mycelium-node's GitHub App is not configured yet` — the manual
+`--github-token-file` path above works regardless, since it never talks
+to the device-flow endpoints at all.
+
 `SIGTERM`/`SIGHUP`/`Ctrl-C` all stop `vllm serve` cleanly (process-group
 kill, no orphaned GPU processes) before the node agent exits.
 **`kill -9` does not** — a killed process can't run its own cleanup
@@ -191,7 +263,7 @@ mycelium-coordinator-status \
 ```
 
 ```
-your-hostname [a1b2c3d4e5f6]: Qwen/Qwen2.5-7B-Instruct
+your-hostname [a1b2c3d4e5f6] (github:octocat) [ok:12 timeout:1 crash:0 disconnect:2]: Qwen/Qwen2.5-7B-Instruct
 ```
 
 (or `No nodes registered.` if none are currently connected).
@@ -223,6 +295,36 @@ disconnected, the coordinator silently retries a different healthy node
 before giving up — you'll never see that as a client-visible error as
 long as another healthy node for the same model exists.
 
+## Step 6 — Ban a misbehaving identity (operator override)
+
+If a volunteer's node needs to be removed for cause — e.g. a report of
+bad-faith output that never tripped a timeout or crash counter — revoke
+their bound GitHub identity outright:
+
+```bash
+mycelium-coordinator-ban \
+  --coordinator-url wss://<coordinator-ip>:8765 \
+  --coordinator-cert ~/.mycelium/coordinator-cert.pem \
+  --token-file ~/.mycelium/token \
+  --identity <github-login>
+```
+
+Use the login shown by `mycelium-coordinator-status`'s `(github:<login>)`
+suffix. On success:
+
+```
+banned 'octocat' — disconnected 1 currently-registered node(s)
+```
+
+Every currently-registered node under that identity is disconnected
+immediately, and every future registration attempt from it is rejected
+with `this identity has been banned by the operator` — reconnects using
+an already-registered key included. There's no unban command: ban state
+is in-memory only, like every other piece of coordinator state, so a
+coordinator restart is the only way to reverse a ban. Banning a GitHub
+login the coordinator has never seen bind to any node fails instead:
+`error: no known identity bound to GitHub login '<login>'`.
+
 ## Troubleshooting
 
 **`ValueError: Free memory on device cuda:<N> (X/Y GiB) on startup is
@@ -245,8 +347,11 @@ see the `PATH` note in Step 3 above.
 Just repeat Step 3 on each GPU machine (each with its own `--node-id` if
 they'd otherwise share a hostname), all pointed at the same coordinator.
 The coordinator round-robins across every node registered for a given
-model. Killing whichever node a request lands on triggers an automatic,
-immediate failover to another healthy node hosting the same model — no
+model, softly biased toward nodes with better completion records once any
+node in the pool has recorded a failure (see issue #36) — a node with a
+poor record is picked less often, never excluded outright. Killing
+whichever node a request lands on triggers an automatic, immediate
+failover to another healthy node hosting the same model — no
 client-visible failure as long as one remains. Live-verified end to end
 (two real nodes, a real coordinator on a separate host, a real client on
 a fourth machine) — see issue #11's design doc for the full transcript.
@@ -268,6 +373,28 @@ copy it out of band (`scp`, not email/Slack) — and never publish it
 anywhere the whole internet could pick it up expecting it to still mean
 something private, since anyone with a copy can pin to and successfully
 validate that same coordinator.
+
+## What this network does not protect against
+
+**A volunteer node sees your prompt in plaintext.** Running inference
+requires the model to read the actual tokens — there's no way to hide a
+prompt from the machine computing over it without breaking inference
+itself. This is the same transparency model Folding@home already uses
+for its work units: you're handing work to a stranger's machine, and
+that machine necessarily sees what it's computing. Don't send anything
+through Mycelium you wouldn't want a volunteer operator to read.
+
+**Mycelium does not verify a node's output is correct.** The coordinator
+only checks protocol-level health — did the node respond, time out, or
+crash — never the content of the response. "The node responded" and "the
+response is trustworthy" are different claims; Phase 1 only makes the
+first one. Redundant-computation-style validation (comparing two nodes'
+output for the same prompt, the way BOINC/Folding@home validate
+deterministic compute) doesn't map cleanly onto LLM inference: sampling
+is stochastic, so two honest nodes can legitimately disagree
+token-for-token on the same prompt. A bad-faith or malfunctioning node's
+wrong output looks, at the protocol level, identical to a correct one —
+nothing here catches that today.
 
 ## Just testing vLLM on a node, no coordinator
 
