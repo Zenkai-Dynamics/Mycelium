@@ -245,9 +245,14 @@ async def test_run_registers_with_coordinator_using_github_token_and_node_id(
     assert crypto.verify_registration_signature(received["public_key"], received["signature"]) is True
 
 
-async def test_run_omits_github_token_when_no_github_token_file_given(
+async def test_run_reads_cached_token_from_default_path_when_flag_omitted(
     tmp_path, monkeypatch, fake_vllm_server
 ):
+    """No --github-token-file given, but a token already exists at the
+    default cache path (injected via default_github_token_path for
+    testability, since the real default is ~/.mycelium/github-token) —
+    must be read verbatim, and the device-flow client must never be
+    called."""
     vllm_port = fake_vllm_server.server_address[1]
     monkeypatch.setattr(
         vllm_process, "build_command", lambda model, port_: [sys.executable, "-c", "import time; time.sleep(600)"]
@@ -256,6 +261,15 @@ async def test_run_omits_github_token_when_no_github_token_file_given(
     cert_path = tmp_path / "cert.pem"
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+    default_token_path = tmp_path / "cached-github-token"
+    default_token_path.write_text("gh-cached-token\n")
+
+    class _ExplodingClient:
+        def request_device_code(self):
+            raise AssertionError("device flow must not run when a cached token exists")
+
+        def poll_once(self, device_code, interval):
+            raise AssertionError("device flow must not run when a cached token exists")
 
     received = {}
     registered_event = asyncio.Event()
@@ -279,7 +293,13 @@ async def test_run_omits_github_token_when_no_github_token_file_given(
             ]
         )
         process = vllm_process.VLLMProcess(model=args.model, gpu=args.gpu, port=args.vllm_port)
-        run_task = asyncio.create_task(_run(args, process))
+        run_task = asyncio.create_task(
+            _run(
+                args, process,
+                default_github_token_path=default_token_path,
+                device_flow_client=_ExplodingClient(),
+            )
+        )
         await asyncio.wait_for(registered_event.wait(), timeout=5.0)
         run_task.cancel()
         try:
@@ -287,7 +307,151 @@ async def test_run_omits_github_token_when_no_github_token_file_given(
         except asyncio.CancelledError:
             pass
 
-    assert "github_token" not in received
+    assert received["github_token"] == "gh-cached-token"
+
+
+async def test_run_authenticates_and_caches_token_when_default_path_missing(
+    tmp_path, monkeypatch, fake_vllm_server
+):
+    vllm_port = fake_vllm_server.server_address[1]
+    monkeypatch.setattr(
+        vllm_process, "build_command", lambda model, port_: [sys.executable, "-c", "import time; time.sleep(600)"]
+    )
+
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+    default_token_path = tmp_path / "not-yet-created" / "github-token"
+
+    device = github_device_flow.DeviceCode(
+        device_code="devcode123", user_code="ABCD-1234",
+        verification_uri="https://github.com/login/device",
+        expires_in=900, interval=5,
+    )
+    client = _FakeDeviceFlowClient(
+        device, [github_device_flow.PollResult(token="gho_fresh", interval=5)]
+    )
+
+    received = {}
+    registered_event = asyncio.Event()
+
+    async def fake_coordinator(websocket):
+        received.update(json.loads(await websocket.recv()))
+        await websocket.send(json.dumps({"type": "registered"}))
+        registered_event.set()
+        await websocket.wait_closed()
+
+    server_ctx = _server_ssl_context(cert_path, key_path)
+    async with websockets.serve(fake_coordinator, "127.0.0.1", 0, ssl=server_ctx) as coordinator:
+        coord_port = coordinator.sockets[0].getsockname()[1]
+        args = parse_args(
+            [
+                "--coordinator-url", f"wss://127.0.0.1:{coord_port}",
+                "--coordinator-cert", str(cert_path),
+                "--node-id", "test-node",
+                "--vllm-port", str(vllm_port),
+                "--node-key-file", str(tmp_path / "node-key.pem"),
+            ]
+        )
+        process = vllm_process.VLLMProcess(model=args.model, gpu=args.gpu, port=args.vllm_port)
+        run_task = asyncio.create_task(
+            _run(
+                args, process,
+                default_github_token_path=default_token_path,
+                device_flow_client=client,
+                device_flow_sleep=_no_op_sleep,
+            )
+        )
+        await asyncio.wait_for(registered_event.wait(), timeout=5.0)
+        run_task.cancel()
+        try:
+            await run_task
+        except asyncio.CancelledError:
+            pass
+
+    assert received["github_token"] == "gho_fresh"
+    assert default_token_path.read_text() == "gho_fresh"
+    assert oct(default_token_path.stat().st_mode)[-3:] == "600"
+
+
+async def test_run_rejects_missing_explicit_github_token_file_before_starting_vllm(
+    tmp_path, monkeypatch, fake_vllm_server
+):
+    """An explicitly-passed --github-token-file that doesn't exist is a
+    hard error — never a fallback into the interactive device flow (see
+    the design doc for issue #34)."""
+    vllm_port = fake_vllm_server.server_address[1]
+    monkeypatch.setattr(
+        vllm_process, "build_command", lambda model, port_: [sys.executable, "-c", "import time; time.sleep(600)"]
+    )
+    cert_path = tmp_path / "cert.pem"
+    cert_path.write_text("placeholder")
+    missing_token_file = tmp_path / "does-not-exist"
+
+    args = parse_args(
+        [
+            "--coordinator-url", "wss://127.0.0.1:1",
+            "--coordinator-cert", str(cert_path),
+            "--github-token-file", str(missing_token_file),
+            "--vllm-port", str(vllm_port),
+        ]
+    )
+    process = vllm_process.VLLMProcess(model=args.model, gpu=args.gpu, port=args.vllm_port)
+
+    with pytest.raises(SystemExit, match="does not exist"):
+        await _run(args, process)
+
+    # vLLM must never have been started — the check happens before
+    # process.start(), so there's nothing to clean up here and no
+    # subprocess was spawned.
+
+
+async def test_run_prints_stale_token_hint_on_matching_rejection_reason(
+    tmp_path, monkeypatch, fake_vllm_server, capsys
+):
+    vllm_port = fake_vllm_server.server_address[1]
+    monkeypatch.setattr(
+        vllm_process, "build_command", lambda model, port_: [sys.executable, "-c", "import time; time.sleep(600)"]
+    )
+
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+    default_token_path = tmp_path / "github-token"
+    default_token_path.write_text("stale-token")
+
+    async def rejecting_coordinator(websocket):
+        await websocket.recv()
+        await websocket.send(json.dumps(
+            {"type": "registration_rejected", "reason": "invalid or expired GitHub token"}
+        ))
+        await websocket.close()
+
+    server_ctx = _server_ssl_context(cert_path, key_path)
+    async with websockets.serve(rejecting_coordinator, "127.0.0.1", 0, ssl=server_ctx) as coordinator:
+        coord_port = coordinator.sockets[0].getsockname()[1]
+        args = parse_args(
+            [
+                "--coordinator-url", f"wss://127.0.0.1:{coord_port}",
+                "--coordinator-cert", str(cert_path),
+                "--vllm-port", str(vllm_port),
+                "--node-key-file", str(tmp_path / "node-key.pem"),
+            ]
+        )
+        process = vllm_process.VLLMProcess(model=args.model, gpu=args.gpu, port=args.vllm_port)
+        run_task = asyncio.create_task(
+            _run(args, process, default_github_token_path=default_token_path)
+        )
+        await asyncio.sleep(1.5)  # let it attempt once and get rejected
+        run_task.cancel()
+        try:
+            await run_task
+        except asyncio.CancelledError:
+            pass
+
+    out = capsys.readouterr().out
+    assert "stale GitHub token" in out
+    assert str(default_token_path) in out
 
 
 async def test_run_answers_a_routed_complete_request(tmp_path, monkeypatch, fake_vllm_server):
@@ -351,6 +515,8 @@ async def test_run_retries_after_registration_rejected(tmp_path, monkeypatch, fa
     cert_path = tmp_path / "cert.pem"
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+    default_token_path = tmp_path / "github-token"
+    default_token_path.write_text("gh-cached-token")
 
     attempt_count = 0
 
@@ -373,7 +539,9 @@ async def test_run_retries_after_registration_rejected(tmp_path, monkeypatch, fa
             ]
         )
         process = vllm_process.VLLMProcess(model=args.model, gpu=args.gpu, port=args.vllm_port)
-        run_task = asyncio.create_task(_run(args, process))
+        run_task = asyncio.create_task(
+            _run(args, process, default_github_token_path=default_token_path)
+        )
         await asyncio.sleep(2.5)  # let it attempt, get rejected, back off (~1s), attempt again
         run_task.cancel()
         try:
@@ -398,6 +566,8 @@ async def test_registration_backoff_resets_after_a_successful_registration(
     cert_path = tmp_path / "cert.pem"
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+    default_token_path = tmp_path / "github-token"
+    default_token_path.write_text("gh-cached-token")
 
     attempt_times = []
 
@@ -428,7 +598,9 @@ async def test_registration_backoff_resets_after_a_successful_registration(
             ]
         )
         process = vllm_process.VLLMProcess(model=args.model, gpu=args.gpu, port=args.vllm_port)
-        run_task = asyncio.create_task(_run(args, process))
+        run_task = asyncio.create_task(
+            _run(args, process, default_github_token_path=default_token_path)
+        )
         # Attempts 1-2 reject (growing the registration backoff to ~1s then
         # ~2s consumed), attempt 3 succeeds+drops (should reset the
         # backoff), attempts 4-5 reject again. If the reset didn't happen,
@@ -518,6 +690,8 @@ def test_sigterm_stops_vllm_process_group_with_no_orphans(tmp_path):
     cert_path = tmp_path / "cert.pem"
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+    github_token_file = tmp_path / "github-token"
+    github_token_file.write_text("gh-secret-token")
 
     env = dict(os.environ)
     env["PATH"] = f"{bin_dir}:{env['PATH']}"
@@ -529,6 +703,7 @@ def test_sigterm_stops_vllm_process_group_with_no_orphans(tmp_path):
             sys.executable, "-m", "mycelium.node.cli",
             "--coordinator-url", "wss://127.0.0.1:1",
             "--coordinator-cert", str(cert_path),
+            "--github-token-file", str(github_token_file),
             "--vllm-port", str(vllm_port),
             "--node-key-file", str(tmp_path / "node-key.pem"),
         ],

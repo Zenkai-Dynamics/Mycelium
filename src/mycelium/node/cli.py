@@ -23,6 +23,16 @@ from mycelium.node.vllm_process import (
 )
 
 
+DEFAULT_GITHUB_TOKEN_PATH = Path.home() / ".mycelium" / "github-token"
+
+# Must match the exact rejection reason string server.py's
+# _handle_registration sends for github_identity.InvalidGithubToken (see
+# coordinator/server.py) — a single, deliberate string-match coupling
+# used only to print a more useful diagnostic hint on retry, not to
+# change control flow. See the design doc for issue #34.
+_STALE_GITHUB_TOKEN_REASON = "invalid or expired GitHub token"
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="mycelium-node")
     parser.add_argument("--coordinator-url", default=None)
@@ -93,7 +103,13 @@ async def _authenticate(client=github_device_flow, sleep=asyncio.sleep) -> str:
             return result.token
 
 
-async def _run(args: argparse.Namespace, process: VLLMProcess) -> None:
+async def _run(
+    args: argparse.Namespace,
+    process: VLLMProcess,
+    default_github_token_path: Path = DEFAULT_GITHUB_TOKEN_PATH,
+    device_flow_client=github_device_flow,
+    device_flow_sleep=asyncio.sleep,
+) -> None:
     node_id = None
     public_key = None
     signature = None
@@ -103,10 +119,29 @@ async def _run(args: argparse.Namespace, process: VLLMProcess) -> None:
         private_key = identity.load_or_create_keypair(args.node_key_file)
         public_key = crypto.public_key_b64(private_key)
         signature = crypto.sign_public_key(private_key)
+
         if args.github_token_file is not None:
+            # Explicitly passed — a missing file is a hard error, never a
+            # fallback into the interactive device flow (see the design
+            # doc for issue #34: a typo'd path on an unattended box must
+            # not silently hang printing a device code nobody's watching
+            # for).
+            if not args.github_token_file.exists():
+                raise SystemExit(
+                    f"--github-token-file at {args.github_token_file} does not exist"
+                )
             github_token = args.github_token_file.read_text().strip()
             if not github_token:
                 raise SystemExit(f"--github-token-file at {args.github_token_file} is empty")
+        elif default_github_token_path.exists():
+            github_token = default_github_token_path.read_text().strip()
+            if not github_token:
+                raise SystemExit(f"{default_github_token_path} is empty")
+        else:
+            github_token = await _authenticate(device_flow_client, device_flow_sleep)
+            default_github_token_path.parent.mkdir(parents=True, exist_ok=True)
+            default_github_token_path.write_text(github_token)
+            default_github_token_path.chmod(0o600)
 
     print(f"starting vLLM ({args.model} on GPU {args.gpu})...", flush=True)
     await asyncio.to_thread(process.start)
@@ -132,7 +167,12 @@ async def _run(args: argparse.Namespace, process: VLLMProcess) -> None:
                 registration_backoff = connection.reconnect_delays()  # reset after success
             except registration.RegistrationError as exc:
                 delay = next(registration_backoff)
-                print(f"registration failed: {exc}; retrying in {delay:.1f}s", flush=True)
+                hint = (
+                    f" (this looks like a stale GitHub token — delete "
+                    f"{default_github_token_path} to re-authenticate)"
+                    if str(exc) == _STALE_GITHUB_TOKEN_REASON else ""
+                )
+                print(f"registration failed: {exc}; retrying in {delay:.1f}s{hint}", flush=True)
                 await websocket.close()
                 await asyncio.sleep(delay)
                 continue
