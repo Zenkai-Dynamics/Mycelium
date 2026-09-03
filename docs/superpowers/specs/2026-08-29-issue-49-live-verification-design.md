@@ -219,3 +219,277 @@ above). Full 3-host network separation (already proven in #25). Any code
 change — a real bug found during the session becomes its own ticket. Any
 change to #33/#36's status-display code — this session only *observes and
 records* that it already works, it doesn't add new coverage to it.
+
+## Live verification (2026-08-30 to 2026-09-03, issue #49)
+
+Run on `a6000` exactly as planned: coordinator + both nodes on that box,
+loopback, one continuous session (spread across several real-world days
+due to VPN connectivity to the box being repeatedly unavailable — see
+below). `~/.mycelium49/` used throughout as a dedicated, isolated
+directory (fresh token/cert), not the operator's normal `~/.mycelium/`,
+except for the GitHub token cache itself which deliberately used the real
+default path (`~/.mycelium/github-token`) since that's what a real
+volunteer's setup would use.
+
+### Setup and a real environment-drift finding
+
+`a6000`'s existing `~/Mycelium` checkout was 17 commits behind main
+(dated from before #33 even merged) — no `mycelium-coordinator-ban`
+binary existed yet. `git pull` + `uv pip install -e '.[node]'` brought it
+current. Not a bug, just a reminder that a long-lived node's checkout
+needs updating before it can be used for anything issue #34-onward.
+
+`nvidia-smi` before starting: GPUs 0/1 idle, GPU 3 at 100% (another
+user's job) — used GPUs 0 and 1 initially. GPU availability changed
+significantly more than once over the course of this session (see
+below) — re-checked and adapted each time rather than assuming a stale
+reading, per the design's own precondition.
+
+### Scenario 1 — device-flow sign-in, with real operational findings
+
+This scenario alone surfaced five distinct, real issues — none of them
+bugs in Mycelium's own code, all in how a headless live session actually
+has to be operated:
+
+1. **The SSH/VPN path to `a6000` was genuinely, repeatedly unstable** —
+   full outages (no ICMP response at all, not just SSH) lasting minutes
+   to tens of minutes, more than once, across multiple real days. This
+   directly interacts with GitHub's device-flow UX: a device code expires
+   in ~15 minutes, and `mycelium-node`'s own polling loop treats *any*
+   network error as fatal with no retry (by design — see issue #34's
+   design doc, "any other error code → catch-all fatal exit"). On flaky
+   networks this means the node process itself dies, not just the current
+   code. Mitigated live with an ad-hoc bash wrapper that kept restarting
+   `mycelium-node` and printing fresh codes until one was authorized
+   before expiring — effective, but confirms this is a real rough edge
+   for volunteers on unreliable connections, worth a note for anyone
+   running this in production on flaky links.
+2. **A real self-inflicted `pkill -f` footgun.** Using `pkill -9 -f
+   'mycelium-node.*node-a-key'` to stop a stuck node killed the *invoking
+   SSH command's own shell*, not the target process — `pkill -f` matches
+   full command lines, and the pattern was a literal substring of the SSH
+   command's own text. Fixed with the standard `pkill -9 -f '[n]ode-a-key'`
+   bracket idiom. A real, easy-to-hit operational mistake, not a Mycelium
+   bug — noted here since it cost real time to diagnose.
+3. **The documented `PATH` gotcha (already known, now hit for real).**
+   Running `.venv/bin/mycelium-node` without also exporting
+   `.venv/bin` onto `PATH` fails with `FileNotFoundError: ... 'vllm'`,
+   exactly as `docs/OPERATIONS.md` already warns. Confirms that
+   documented caveat is accurate and still current.
+4. **A cached GitHub token went stale after several real days** and the
+   exact diagnostic hint added by issue #34's final review fired for
+   real: `registration failed: invalid or expired GitHub token; ...
+   this looks like a stale GitHub token — delete
+   /home/training-framework/.mycelium/github-token to re-authenticate`.
+   Deleting the file and restarting triggered a fresh device flow as
+   designed — the hint's advice is correct and was followed successfully.
+5. **`kill -9` on just `mycelium-node`'s parent process orphans `vllm
+   serve`, exactly as `docs/OPERATIONS.md`'s troubleshooting section
+   already warns** — hit repeatedly across this session (each time
+   producing a later `OSError: [Errno 98] Address already in use` on the
+   next launch attempt). Recovered each time with the documented pattern:
+   find the orphan via `pgrep -f 'vllm serve.*--port <port>'`,
+   confirm its pgid via `ps -o pid,pgid,cmd`, `kill -9 -<pgid>` (the
+   leading `-` to target the whole process group). Confirms that
+   documented recovery procedure works exactly as written.
+
+Once past these, the actual protocol behavior worked precisely as
+designed. Node A, no cached token:
+
+```
+$ mycelium-node --coordinator-url wss://127.0.0.1:8765 \
+    --coordinator-cert ~/.mycelium49/coordinator-cert.pem \
+    --node-id a6000-node-a --gpu 2 --vllm-port 8811 \
+    --node-key-file ~/.mycelium49/node-a-key.pem
+First copy your one-time code: 0D95-B419
+Then visit: https://github.com/login/device and enter it
+```
+
+Authorized in a browser (a different session than the one used to verify
+#48, showing this works from an arbitrary GitHub account, not just the
+App's own owner) — `mycelium-node` picked it up automatically, started
+vLLM, and registered:
+
+```
+starting vLLM (Qwen/Qwen2.5-7B-Instruct on GPU 2)...
+vLLM ready
+mycelium-node 0.1.0 connecting to wss://127.0.0.1:8765
+connected to coordinator (wss://127.0.0.1:8765)
+registered with coordinator as 'a6000-node-a'
+```
+
+`mycelium-coordinator-status` immediately after (also the incidental
+#33/#36 display-under-real-conditions coverage the design called for):
+
+```
+$ mycelium-coordinator-status --coordinator-url wss://127.0.0.1:8765 \
+    --coordinator-cert ~/.mycelium49/coordinator-cert.pem \
+    --token-file ~/.mycelium49/token
+a6000-node-a [1b46f412a0e1] (github:Varun-Gambhir) [ok:0 timeout:0 crash:0 disconnect:0]: Qwen/Qwen2.5-7B-Instruct
+```
+
+Real fingerprint, real bound GitHub login, fresh reputation counters —
+all displaying correctly.
+
+Node B started next, reusing the cached token (no second device flow —
+confirmed the "already-bound identity" fast path works exactly as
+designed):
+
+```
+a6000-node-a [1b46f412a0e1] (github:Varun-Gambhir) [ok:0 timeout:0 crash:0 disconnect:0]: Qwen/Qwen2.5-7B-Instruct
+a6000-node-b [85b5a8002072] (github:Varun-Gambhir) [ok:0 timeout:0 crash:0 disconnect:0]: Qwen/Qwen2.5-7B-Instruct
+```
+
+**Baseline.** Two client requests, one per node, confirmed round-robin
+before any failure injection:
+
+```
+$ mycelium-client ... --prompt "What is the capital of France? Answer in one short sentence."
+The capital of France is Paris.
+$ mycelium-client ... --prompt "What is the capital of Japan? Answer in one short sentence."
+The capital of Japan is Tokyo.
+```
+
+Each node's own log showed exactly one `POST /v1/chat/completions` —
+clean 1:1 split, matching the round-robin baseline exactly.
+
+### Scenario 2 — per-identity cap
+
+The lightweight stand-in script (direct use of
+`mycelium.crypto`/`mycelium.node.identity`/`mycelium.node.registration`,
+no vLLM) worked exactly as designed. One real finding along the way: the
+stand-in's first version registered with the *real* model string,
+making it an unintended routing candidate for actual client
+completions despite having nothing behind it to serve them — caught
+before it could interfere, fixed by registering it under a distinct
+placeholder model string instead (cap enforcement itself is
+model-agnostic, so this changes nothing about what's being tested).
+
+```
+$ python3 standin.py standin1-key.pem standin-1
+REGISTERED: standin-1 (nrlL8CAXiaHEebO1...)
+```
+
+Status confirmed 3 slots filled under one identity:
+
+```
+a6000-node-a [1b46f412a0e1] (github:Varun-Gambhir) [ok:1 timeout:0 crash:0 disconnect:0]: Qwen/Qwen2.5-7B-Instruct
+a6000-node-b [85b5a8002072] (github:Varun-Gambhir) [ok:1 timeout:0 crash:0 disconnect:0]: Qwen/Qwen2.5-7B-Instruct
+standin-1 [fcd920661c67] (github:Varun-Gambhir) [ok:0 timeout:0 crash:0 disconnect:0]: standin-placeholder-model
+```
+
+A second stand-in attempt, same identity:
+
+```
+$ python3 standin.py standin2-key.pem standin-2
+REJECTED: identity has reached the maximum of 3 registered nodes
+```
+
+Exact reason, exact cap default (3) — confirmed live, first try.
+
+### Scenario 3 — reputation-weighted selection
+
+Killing only Node B's `vllm serve` subprocess (`pgrep -f 'vllm serve.*
+--port 8812'` → `ps -o pgid=` → `kill -9 -<pgid>`, Node B's own
+`mycelium-node` process left alive) produced real, fast, genuine
+failures on the next client requests routed there:
+
+```
+$ mycelium-client ... --prompt "Say the word apple."
+error: <urlopen error [Errno 111] Connection refused>
+```
+
+3 real crashes accumulated this way, confirmed via
+`mycelium-coordinator-status`'s live-incrementing `crash:` counter.
+
+**A genuinely interesting real finding, not a bug:** getting a real
+*disconnect* count on demand turned out to be much harder than expected,
+and revealed something worth documenting precisely. `kill -9` on a
+node's whole process closes its OS-level socket essentially
+instantaneously — the coordinator's own connection handler notices the
+closed connection and unregisters it (removing it from
+`mycelium-coordinator-status`'s listing) far faster than any external,
+independently-launched `mycelium-client` process can realistically win a
+race to have already been routed there first. Multiple attempts
+(sequential bursts, 15–20-way concurrent bursts, log-triggered kills,
+timed kills mid-generation) all missed this window. What actually
+happened: `record_disconnect` **was** firing correctly on several of
+these attempts — but `mycelium-coordinator-status` only lists
+*currently-registered* nodes, so a node that disconnects and isn't yet
+reconnected is invisible to that command, counters and all, even though
+the counters themselves (keyed by public key, independent of
+`_nodes`) were accumulating correctly underneath the whole time. This
+was only discovered because a routine status check *after* Node B had
+reconnected showed `crash:3 disconnect:6` — six real disconnects had
+already been recorded across earlier attempts, invisible until the node
+was back online to display them. **Lesson for anyone verifying
+reputation counters live: check status while the node in question is
+registered, or the counters can be silently accumulating exactly as
+designed with no visible confirmation until the next reconnect.** Not a
+bug — `mycelium-coordinator-status` was never asked to show
+disconnected nodes' history — but a real, non-obvious operational
+subtlety worth this note for the next person who tries this.
+
+With real accumulated history (`ok:6 crash:3 disconnect:6` on Node B,
+weight ≈ 0.44; Node A clean at weight 1.0), a batch of 20 sequential
+client requests was sent and the split recorded:
+
+```
+Node A: 17/20 (85%)
+Node B: 3/20 (15%)
+```
+
+Clearly favored, never excluded — exactly the property being verified.
+(The exact ratio differs from the plan's back-of-envelope ≈80%/at-least-once
+estimate, which assumed a clean staged 4-failure state; the real number
+reflects organic history accumulated live across multiple real attempts,
+and still comfortably satisfies both the "meaningfully more than half"
+and "at least once" criteria the design set in advance.)
+
+### Scenario 4 — manual ban
+
+```
+$ mycelium-coordinator-ban --coordinator-url wss://127.0.0.1:8765 \
+    --coordinator-cert ~/.mycelium49/coordinator-cert.pem \
+    --token-file ~/.mycelium49/token --identity Varun-Gambhir
+banned 'Varun-Gambhir' — disconnected 3 currently-registered node(s)
+```
+
+All three entities under the identity (Node A, Node B, and the
+scenario-2 stand-in, kept deliberately connected through this scenario
+per the design) — `disconnected_count: 3`, matching the design's
+adjusted expectation exactly.
+
+```
+$ mycelium-coordinator-status ...
+No nodes registered.
+```
+
+A fresh registration attempt from the same identity, confirmed rejected:
+
+```
+$ python3 standin.py standin3-key.pem standin-3
+REJECTED: this identity has been banned by the operator
+```
+
+### Summary
+
+All four acceptance criteria met with real evidence, on real hardware,
+against the real GitHub API:
+
+- [x] Real device-flow sign-in and registration (scenario 1)
+- [x] Real per-identity cap rejection, exact reason (scenario 2)
+- [x] Real reputation-weighted selection, 85%/15% split, never excluded (scenario 3)
+- [x] Real ban: 3 nodes disconnected, future registration rejected (scenario 4)
+- [x] `mycelium-coordinator-status` confirmed correct throughout (incidental #33/#36 coverage)
+- [x] Genuine coordinator-side `NodeTimeoutError` remains an accepted, documented gap (unchanged from the design)
+
+No code bugs found. All real findings above are operational/environmental
+(a stale checkout, a `pkill -f` self-match footgun, already-documented
+`PATH`/orphaned-vLLM gotchas confirmed accurate, VPN instability, and the
+disconnect-counter-visibility subtlety) — none require a Mycelium code
+change, so none become follow-up tickets per the design's own criterion
+for what would.
+
+This closes out #31 (Phase 1) for real — all seven original sub-issues
+plus both follow-up tickets (#48, #49) are now done.
