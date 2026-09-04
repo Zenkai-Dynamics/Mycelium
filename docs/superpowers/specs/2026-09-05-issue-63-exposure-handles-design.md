@@ -129,6 +129,17 @@ errs toward over-reporting, which is the right direction for a privacy
 report to err — under-reporting would be a false privacy claim in the
 flattering direction.
 
+### A client-facing `reason` never names a node
+
+`RoutingError` messages are relayed to the client verbatim as a reply's
+`reason`, so none of them may carry `node_id` — which defaults to the
+volunteer's `socket.gethostname()`. A timeout reply carries exactly one
+entry in `exposed`, so a reason reading `node 'gpu-box.local' did not
+respond` would hand the client the handle to machine-name mapping that
+this whole slice exists to withhold, stable for the coordinator's
+lifetime. The messages still say what went wrong; they just say it about
+"the node" rather than about a named one.
+
 ### Field presence
 
 `exposed` is on every `complete_result` and `complete_error`, `[]` when

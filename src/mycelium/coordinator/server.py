@@ -412,10 +412,16 @@ async def _handle_registration(websocket, registry: NodeRegistry, message: dict)
         # timed out via ping/pong (#9), or superseded by a reconnect
         # (_close_in_background above, which triggers this same cleanup
         # for the *old* connection's own _handle_registration task).
+        #
+        # NodeDroppedError specifically, not the NodeDisconnectedError
+        # base: reaching here means the request was already sent and this
+        # node had it in hand when the connection died, so it counts as
+        # exposure. The class choice is what puts the node in the reply's
+        # `exposed` list — see the design doc for issue #63.
         for pending_future in node.pending.values():
             if not pending_future.done():
                 pending_future.set_exception(
-                    router.NodeDroppedError(f"node {node_id!r} disconnected mid-request")
+                    router.NodeDroppedError("node disconnected mid-request")
                 )
 
 

@@ -1877,6 +1877,53 @@ async def test_failover_reports_both_the_dropped_node_and_the_one_that_answered(
     ], "the node that received-then-dropped read the request too, and must be reported"
 
 
+async def test_a_timed_out_node_is_reported_as_exposed(monkeypatch):
+    """The design's headline case, and the one that most needs asserting:
+    a node that received the request and never answered is
+    indistinguishable from one that read it and then failed, so the
+    report must assume the volunteer saw it. See the design doc for
+    issue #63."""
+    monkeypatch.setattr(router, "NODE_COMPLETE_TIMEOUT_SECONDS", 0.2)
+    registry = NodeRegistry("secret-token", handle_secret=b"s" * 32)
+    slow_ws = _FakeNodeWebsocket()  # accepts the send, never replies
+    registry.register(PUBKEY_A, "node-a", "m", slow_ws)
+
+    client_ws = _FakeClientWebsocket()
+    await server._handle_complete_request(
+        client_ws, registry, {"token": "secret-token", "model": "m", "prompt": "hi"}
+    )
+
+    response = json.loads(client_ws.sent[0])
+    assert response["type"] == "complete_error"
+    assert [entry["node_handle"] for entry in response["exposed"]] == [
+        crypto.handle(b"s" * 32, PUBKEY_A)
+    ], "the node read the request and may still be processing it"
+    assert isinstance(response["elapsed_ms"], int)
+
+
+async def test_client_facing_error_reason_never_names_the_node(monkeypatch):
+    """node_id defaults to socket.gethostname() (node/cli.py), and a
+    timeout reply carries exactly one exposed handle — so naming the node
+    in `reason` would hand the client the handle -> machine-name mapping
+    the whole exposure-handle feature exists to withhold. See the design
+    doc for issue #63."""
+    monkeypatch.setattr(router, "NODE_COMPLETE_TIMEOUT_SECONDS", 0.2)
+    registry = NodeRegistry("secret-token", handle_secret=b"s" * 32)
+    registry.register(PUBKEY_A, "volunteer-laptop.local", "m", _FakeNodeWebsocket())
+
+    client_ws = _FakeClientWebsocket()
+    await server._handle_complete_request(
+        client_ws, registry, {"token": "secret-token", "model": "m", "prompt": "hi"}
+    )
+
+    response = json.loads(client_ws.sent[0])
+    assert response["type"] == "complete_error"
+    assert "volunteer-laptop.local" not in json.dumps(response)
+    # Still useful: the client has to be able to tell a timeout from
+    # anything else that could have gone wrong.
+    assert "did not respond" in response["reason"]
+
+
 async def test_a_node_whose_send_failed_is_not_reported_as_exposed(tmp_path, monkeypatch):
     """NodeSendFailedError means the bytes never left the coordinator, so
     that node saw nothing and must not appear in the report.

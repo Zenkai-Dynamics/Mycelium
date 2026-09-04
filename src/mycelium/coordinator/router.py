@@ -152,9 +152,14 @@ async def route_request(
             async with asyncio.timeout(timeout):
                 message = await future
         except TimeoutError:
-            raise NodeTimeoutError(
-                f"node {node.node_id!r} did not respond within {timeout}s"
-            ) from None
+            # Deliberately anonymous. Every RoutingError message here can
+            # end up relayed to the client verbatim as a reply's `reason`,
+            # and node_id defaults to the volunteer's socket.gethostname()
+            # (node/cli.py). A timeout reply carries exactly one exposed
+            # handle, so naming the node would hand the client the
+            # handle -> machine-name mapping that this whole feature
+            # exists to withhold. See the design doc for issue #63.
+            raise NodeTimeoutError(f"node did not respond within {timeout}s") from None
     finally:
         node.pending.pop(request_id, None)
 
