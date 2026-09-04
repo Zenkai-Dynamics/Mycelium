@@ -330,7 +330,9 @@ that is painful to trace back from a wrong answer.
 `role` is not restricted to `system`/`user`/`assistant` — any non-empty
 string is passed through, since chat templates use others. Each entry
 must be an object with a string `role` and a string `content`; anything
-else comes back as a `complete_error` naming the offending index.
+else comes back as a `complete_error` — naming the offending index for a
+malformed entry, or describing the whole array for a malformed list
+(e.g. empty).
 
 Keeping the conversation within the model's context window is the
 caller's job. The node never silently truncates.
