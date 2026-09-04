@@ -1,54 +1,73 @@
 # Phase 2 — Multi-LLM Agentic Flow
 
-Status: Future — not started, not brainstormed in depth yet
+Status: Designed, not yet built ([PRD: issue #54](https://github.com/Zenkai-Dynamics/Mycelium/issues/54))
 Depends on: [Phase 1](phase-1-open-network.md) network of nodes
+Related: [Phase 2 design rationale](../superpowers/specs/2026-09-04-phase-2-multi-llm-agentic-design.md),
+[ADR-0003 — client-side orchestration](../adr/0003-client-side-orchestration.md),
+[CONTEXT.md](../../CONTEXT.md) (glossary)
 
 ## Goal
 
-Host multiple *different* LLMs across different nodes (one node may host
-one model, or more than one if its hardware allows), and build an agent
-whose agentic flow calls across several of these models rather than just
-one. This is the first phase where a single logical task touches more
-than one host.
+Host multiple *different* LLMs across different nodes, and build an agent
+whose flow calls across several of these models rather than just one. This
+is the first phase where a single logical task touches more than one host.
 
 ## What's decided
 
-- Different nodes may host different models — no longer "one model,
-  many interchangeable nodes" as in Phases 0–1.
-- The reason for multiple models is an agent that uses them together in
-  one agentic flow (e.g. different models for different steps/roles).
-- At least *some part* of the working context has to move from one host
-  to another for a multi-hop agentic flow to work at all — this much is
-  a hard constraint, not a choice.
+- **Orchestration is client-side; the coordinator stays stateless.** A flow
+  is N ordinary `complete` round-trips, each naming a model, with the client
+  holding context between them. This is forced more than chosen:
+  [ADR-0002](../adr/0002-node-transport-model.md)'s live reachability tests
+  proved nodes have outbound access only, so a node cannot open a connection
+  to another node — host-to-host handoff, one of the two options this doc
+  originally posed, is architecturally unavailable. See
+  [ADR-0003](../adr/0003-client-side-orchestration.md).
+- **Different nodes hosting different models already works** — each node
+  registers its own `--model` and routing matches the model string exactly.
+  Verified against the code; no work needed.
+- **Context crosses as a `messages` array**, client → coordinator → node →
+  vLLM, preserving system/user/assistant roles. The existing `prompt` string
+  remains a one-message shorthand; sending both is rejected as ambiguous.
+- **A minimal client-facing `list_models`** lists currently-served models and
+  healthy-node counts, without exposing node fingerprints, bound GitHub
+  identities or reputation counters.
+- **A model missing mid-flow fails that hop and surfaces to the agent**, as
+  today. `list_models` is advisory; the coordinator never silently
+  substitutes a different model.
+- **Staying within a model's context window is the client's job.** Overflow
+  returns a clear typed error — never silent truncation on the node.
+- **Client-caused faults stop damaging node reputation.** A defect found
+  while grilling: an over-length request currently records a *crash* against
+  an innocent node. Phase 2 separates client-caused (4xx) from node-caused
+  (5xx/crash/timeout) failures.
+- **Mycelium ships primitives plus one reference agent, not an agent
+  framework.** The agent lives in `examples/`, deliberately outside the
+  installed package.
+- **Multi-model-per-node is deferred** — a GPU-memory optimization, not a
+  capability unlock; run more nodes instead.
+- **Privacy: a real mechanism for aggregation, plus continued disclosure for
+  what stays unfixable.** Phase 1's problem — a node reads the plaintext it
+  serves — remains unfixable. Phase 2's *new* problem is aggregation: each
+  successive node could otherwise see the original task and every prior
+  model's output. The client library therefore **never carries context
+  forward implicitly** — it records the flow locally but sends only what each
+  call names ([ADR-0004](../adr/0004-explicit-per-hop-context.md)), and
+  reports what each node actually received so the property is checkable.
+  Structural, not a setting. Hardware TEEs were investigated and rejected as
+  unavailable: GPU confidential computing needs Hopper H100 or newer, and the
+  A6000s this project runs on cannot do it. This narrows *how much* each
+  volunteer sees — not *whether* they see it.
+- **Latency is measured, not assumed.** Client-side orchestration costs
+  (N−1) extra client↔coordinator round-trips. Expected to be noise against
+  multi-second inference; a live-hardware measurement confirms rather than
+  assumes, answering this doc's original open question with data.
 
-## Open questions — the central one is explicitly unresolved
+## Non-goals
 
-This was flagged as an open question at the very start of brainstorming
-and has not been answered since:
+Streaming responses. Conversation persistence. Capability-based routing
+("any coding model") — model strings stay exact. Multi-model-per-node.
+Opening client-side access to the public (inherited from Phase 1). Anything
+Phase 3 (layer/pipeline splitting a single model across farms).
 
-> "the context either remains at user's machine or is passed to the llm
-> host — idk how should we move on that — but somehow we have to pass at
-> least some parts from one host to another."
-
-Specifically undecided:
-
-- **Where does context live by default?** Does the client hold the full
-  conversation/task state and re-send whatever's needed on each hop
-  (stateless per-hop, like Phases 0–1), or does state get handed off
-  host-to-host directly?
-- **What crosses a host boundary vs. stays local?** If only "some parts"
-  move, which parts, and on what basis?
-- **Privacy/trust implications of state crossing a boundary.** Once
-  context (not just a single prompt) reaches a second, third host, more
-  of a conversation is exposed to more parties than in Phase 0/1's
-  single-hop model. Not analyzed.
-- **Routing logic.** How does the agent decide which model/node handles
-  each step of its flow?
-- **Latency/geography.** Multiple hops across geographically separated
-  hosts within a single agent turn — no sense yet of whether this is
-  fast enough to be usable.
-
-## Non-goals (inherited)
-
-Payments/incentive mechanisms, model training/fine-tuning, multi-tenant
-SLAs — see Readme §3.
+Inherited global non-goals: payments/incentive mechanisms, model
+training/fine-tuning, multi-tenant SLAs — see Readme §3.
