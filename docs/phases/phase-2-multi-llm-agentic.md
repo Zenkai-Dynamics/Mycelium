@@ -1,6 +1,6 @@
 # Phase 2 — Multi-LLM Agentic Flow
 
-Status: Designed, not yet built
+Status: Designed, not yet built ([PRD: issue #54](https://github.com/Zenkai-Dynamics/Mycelium/issues/54))
 Depends on: [Phase 1](phase-1-open-network.md) network of nodes
 Related: [Phase 2 design rationale](../superpowers/specs/2026-09-04-phase-2-multi-llm-agentic-design.md),
 [ADR-0003 — client-side orchestration](../adr/0003-client-side-orchestration.md),

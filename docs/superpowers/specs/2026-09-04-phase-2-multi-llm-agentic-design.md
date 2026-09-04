@@ -1,7 +1,7 @@
 # Phase 2 — Multi-LLM Agentic Flow — Design
 
 Date: 2026-09-04
-Status: Approved, not yet implemented
+Status: Approved, PRD published as issue #54, not yet implemented
 Related: [ADR-0003 — client-side orchestration](../../adr/0003-client-side-orchestration.md),
 [CONTEXT.md](../../../CONTEXT.md) (glossary), [Phase 2 doc](../../phases/phase-2-multi-llm-agentic.md)
 
