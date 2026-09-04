@@ -23,7 +23,7 @@ from pathlib import Path
 import websockets
 
 from mycelium import crypto
-from mycelium.coordinator import github_identity, router
+from mycelium.coordinator import completion_request, github_identity, router
 from mycelium.coordinator.registry import (
     IdentityBanned,
     IdentityCapReached,
@@ -129,24 +129,26 @@ async def _handle_complete_request(websocket, registry: NodeRegistry, message: d
         await websocket.close()
         return
 
-    model = message.get("model")
-    prompt = message.get("prompt")
-    if not model or not prompt:
-        try:
-            await websocket.send(json.dumps(
-                {"type": "complete_error", "reason": "model and prompt are required"}
-            ))
-        except websockets.exceptions.ConnectionClosed:
-            return
-        await websocket.close()
-        return
-
     async def reject(reason: str) -> None:
         try:
             await websocket.send(json.dumps({"type": "complete_error", "reason": reason}))
         except websockets.exceptions.ConnectionClosed:
             return
         await websocket.close()
+
+    model = message.get("model")
+    if not model:
+        await reject("model is required")
+        return
+
+    # The coordinator is the single place the one-message `prompt`
+    # shorthand is expanded, so the node wire has exactly one shape —
+    # see the design doc for issue #55.
+    try:
+        messages = completion_request.normalize_messages(message)
+    except completion_request.InvalidCompletionRequest as exc:
+        await reject(str(exc))
+        return
 
     tried: set[str] = set()
     while True:
@@ -162,9 +164,7 @@ async def _handle_complete_request(websocket, registry: NodeRegistry, message: d
             # Production behavior is unchanged — the constant is never
             # mutated after import there.
             text = await router.route_request(
-                node,
-                [{"role": "user", "content": prompt}],
-                timeout=router.NODE_COMPLETE_TIMEOUT_SECONDS,
+                node, messages, timeout=router.NODE_COMPLETE_TIMEOUT_SECONDS
             )
         except router.NodeDisconnectedError:
             # The picked node is actually dead — self-heal the registry

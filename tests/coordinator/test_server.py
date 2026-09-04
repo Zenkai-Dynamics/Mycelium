@@ -896,6 +896,95 @@ async def test_complete_request_with_missing_prompt_returns_error(tmp_path):
             assert response["type"] == "complete_error"
 
 
+async def test_complete_request_with_messages_reaches_the_node_intact(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    messages = [
+        {"role": "system", "content": "be terse"},
+        {"role": "user", "content": "capital of France?"},
+        {"role": "assistant", "content": "Paris."},
+        {"role": "user", "content": "and of Spain?"},
+    ]
+    received: list[dict] = []
+
+    def reply(msg):
+        received.append(msg)
+        return {"type": "complete_result", "text": "Madrid."}
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token",
+        identity_verifier=_fake_identity_verifier,
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as node_ws:
+            payload, _ = _register_payload("node-a", "m")
+            await node_ws.send(json.dumps(payload))
+            await node_ws.recv()  # consume "registered"
+            node_task = asyncio.create_task(_run_fake_node(node_ws, reply))
+
+            async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws:
+                await client_ws.send(json.dumps({
+                    "type": "complete", "token": "secret-token",
+                    "model": "m", "messages": messages,
+                }))
+                response = json.loads(await client_ws.recv())
+
+            node_task.cancel()
+
+    assert response["type"] == "complete_result"
+    assert response["text"] == "Madrid."
+    assert received[0]["messages"] == messages, (
+        "roles must survive coordinator -> node with the array unchanged"
+    )
+
+
+async def test_complete_request_with_both_prompt_and_messages_is_rejected(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token",
+        identity_verifier=_fake_identity_verifier,
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws:
+            await client_ws.send(json.dumps({
+                "type": "complete", "token": "secret-token", "model": "m",
+                "prompt": "hi", "messages": [{"role": "user", "content": "hi"}],
+            }))
+            response = json.loads(await client_ws.recv())
+
+    assert response["type"] == "complete_error"
+    assert "both" in response["reason"].lower()
+
+
+async def test_complete_request_with_malformed_messages_is_rejected(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token",
+        identity_verifier=_fake_identity_verifier,
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws:
+            await client_ws.send(json.dumps({
+                "type": "complete", "token": "secret-token", "model": "m",
+                "messages": [{"role": "user"}],
+            }))
+            response = json.loads(await client_ws.recv())
+
+    assert response["type"] == "complete_error"
+    assert "content" in response["reason"]
+
+
 async def test_complete_request_node_reports_failure_is_relayed_to_client(tmp_path):
     cert_path = tmp_path / "cert.pem"
     key_path = tmp_path / "key.pem"
