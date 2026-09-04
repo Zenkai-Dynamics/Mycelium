@@ -142,7 +142,11 @@ async def _handle_complete_request(websocket, registry: NodeRegistry, message: d
 
     exposed: list[dict] = []
     attempts = 0
-    started = time.monotonic()
+    # Assigned just before the retry loop below, not here: `elapsed_ms`
+    # is the coordinator's *routing* time, and reject() only ever reads
+    # it once `attempts` is non-zero — which cannot happen before the
+    # loop starts. See the design doc for issue #63.
+    started: float
 
     async def reject(reason: str) -> None:
         reply = {"type": "complete_error", "reason": reason, "exposed": exposed}
@@ -169,6 +173,12 @@ async def _handle_complete_request(websocket, registry: NodeRegistry, message: d
         return
 
     tried: set[str] = set()
+    # Started here rather than at the top of the handler so the span
+    # covers routing only. Including coordinator-side validation would
+    # inflate `elapsed_ms` and so shrink the `wall_time - elapsed_ms`
+    # overhead figure issue #61 exists to measure — biasing it in the
+    # direction that hides overhead. See the design doc for issue #63.
+    started = time.monotonic()
     while True:
         try:
             node = registry.find_node_for_model(model, exclude=frozenset(tried))

@@ -80,7 +80,10 @@ covered only the successful attempt, time spent on a failed node would be
 silently reattributed to client↔coordinator overhead — inflating the exact
 number #61 exists to measure, and doing it invisibly, since the client
 cannot tell a failover happened. Measured with `time.monotonic()` from the
-start of the loop.
+start of the loop — after `model` validation and `normalize_messages`,
+which are coordinator-side request checking rather than routing. Folding
+them in would inflate `elapsed_ms` and so shrink the reported overhead,
+biasing that number in the direction that hides it.
 
 ### Exposure means "the bytes left the coordinator for this node"
 
