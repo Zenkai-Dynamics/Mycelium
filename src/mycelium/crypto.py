@@ -105,10 +105,15 @@ def handle(secret: bytes, value: str) -> str:
     `secret` — used to tell a client which node and which identity served
     each hop of its flow without disclosing either.
 
-    HMAC rather than a plain hash, specifically: clients hold the shared
-    token and know the model strings they asked for, so any digest they
-    could recompute from data they already have would be resolvable by
-    them. The secret is what makes a handle groupable but not
+    HMAC rather than a plain hash, specifically. A node handle's input is
+    the node's base64 public key, and a client holding the shared token
+    can call `status_query` (coordinator/server.py) and get back every
+    registered node's `fingerprint` — which is `sha256(raw_public_key)`
+    truncated to FINGERPRINT_LENGTH. So an unsalted
+    `sha256(public_key)[:HANDLE_LENGTH]` handle would share its first 12
+    characters with a fingerprint the client already has in hand,
+    resolving a handle to a node by prefix match and no work at all. The
+    per-process secret is what makes a handle groupable but not
     identifying. See the design doc for issue #63 and ADR-0004.
     """
     return hmac.new(secret, value.encode("utf-8"), hashlib.sha256).hexdigest()[:HANDLE_LENGTH]

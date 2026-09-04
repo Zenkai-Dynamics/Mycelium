@@ -1543,6 +1543,13 @@ async def test_complete_request_returns_error_when_every_node_is_dead():
     response = json.loads(client_ws.sent[0])
     assert response["type"] == "complete_error"
     assert registry.list_nodes() == []
+    # The subtle half of the field-presence rule: nodes were attempted,
+    # so `elapsed_ms` is reported, but neither send landed, so nothing was
+    # exposed. The condition for `elapsed_ms` is "at least one node was
+    # attempted", not "at least one node was exposed" — this request
+    # really did spend coordinator time. See the design doc for issue #63.
+    assert response["exposed"] == []
+    assert isinstance(response["elapsed_ms"], int)
 
 
 async def test_registration_rejected_when_identity_is_banned(tmp_path):
@@ -1724,6 +1731,11 @@ async def test_complete_result_carries_exposure_handles_and_timing(tmp_path):
     assert response["exposed"][0]["node_handle"] == crypto.handle(b"s" * 32, public_key)
     assert response["exposed"][0]["identity_handle"]
     assert isinstance(response["elapsed_ms"], int)
+    # Exactly these keys and nothing else. An allowlist, not a denylist:
+    # a field nobody thought to forbid is how a volunteer's hostname or
+    # fingerprint gets onto the wire unnoticed.
+    assert set(response) == {"type", "text", "exposed", "elapsed_ms"}
+    assert set(response["exposed"][0]) == {"node_handle", "identity_handle"}
     # The reply must not carry anything that resolves a volunteer.
     assert "public_key" not in response
     assert "fingerprint" not in response
@@ -1809,6 +1821,10 @@ async def test_node_reported_failure_still_reports_that_node_as_exposed(tmp_path
     assert response["type"] == "complete_error"
     assert response["exposed"][0]["node_handle"] == crypto.handle(b"s" * 32, public_key)
     assert isinstance(response["elapsed_ms"], int)
+    # Exactly these keys and nothing else, same reasoning as the
+    # complete_result case above.
+    assert set(response) == {"type", "reason", "exposed", "elapsed_ms"}
+    assert set(response["exposed"][0]) == {"node_handle", "identity_handle"}
 
 
 async def test_failover_reports_both_the_dropped_node_and_the_one_that_answered(
