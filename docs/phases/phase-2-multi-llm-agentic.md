@@ -45,11 +45,18 @@ is the first phase where a single logical task touches more than one host.
   installed package.
 - **Multi-model-per-node is deferred** — a GPU-memory optimization, not a
   capability unlock; run more nodes instead.
-- **Privacy: disclosure, sharpened — not a new mechanism.** Several nodes now
-  each see a growing slice of one conversation, including other models'
-  outputs. Because orchestration is client-side, the agent author controls
-  exactly what each hop carries; that is the honest mitigation, and the docs
-  say so plainly.
+- **Privacy: a real mechanism for aggregation, plus continued disclosure for
+  what stays unfixable.** Phase 1's problem — a node reads the plaintext it
+  serves — remains unfixable. Phase 2's *new* problem is aggregation: each
+  successive node could otherwise see the original task and every prior
+  model's output. The client library therefore **never carries context
+  forward implicitly** — it records the flow locally but sends only what each
+  call names ([ADR-0004](../adr/0004-explicit-per-hop-context.md)), and
+  reports what each node actually received so the property is checkable.
+  Structural, not a setting. Hardware TEEs were investigated and rejected as
+  unavailable: GPU confidential computing needs Hopper H100 or newer, and the
+  A6000s this project runs on cannot do it. This narrows *how much* each
+  volunteer sees — not *whether* they see it.
 - **Latency is measured, not assumed.** Client-side orchestration costs
   (N−1) extra client↔coordinator round-trips. Expected to be noise against
   multi-second inference; a live-hardware measurement confirms rather than

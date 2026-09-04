@@ -81,3 +81,14 @@ library; Mycelium ships exactly one, as a demonstration, not as a framework.
 **Orchestration**:
 Deciding the order of hops and what context each carries. In Mycelium this
 happens client-side (see ADR-0003), never on the coordinator or a node.
+
+**Flow record**:
+The client's own local history of a flow — every hop, what was sent, what came
+back, and which node served it. Local to the client and never transmitted;
+distinct from the context, which is what a given hop actually sends.
+
+**Exposure**:
+How much of a flow one node, or one identity, actually received. The quantity
+Phase 2's explicit-context rule (ADR-0004) exists to minimize, and which the
+client can report per flow. Not the same as disclosure — a serving node always
+reads its own hop.

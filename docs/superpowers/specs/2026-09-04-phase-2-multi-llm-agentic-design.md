@@ -120,16 +120,41 @@ truncation on the node was rejected outright: quietly discarding context the
 agent believed it had sent produces confidently wrong answers with no signal
 at all — the worst available failure mode.
 
-**Privacy is handled by disclosure, with sharper framing — not by a new
-mechanism.** Phase 1 disclosed that a volunteer node necessarily sees the
-plaintext prompt it serves. Phase 2 widens that materially: several nodes each
-see a growing slice of one conversation, including other models' outputs. No
-mechanism is added, consistent with Phase 1's finding that hiding a prompt
-from the machine computing over it is not feasible. The honest mitigation is
-structural rather than cryptographic: because orchestration is client-side,
-the agent author decides exactly what each hop carries — and the
-documentation should say so plainly rather than implying protection that does
-not exist.
+**Privacy: a real mechanism for the problem Phase 2 actually introduces —
+aggregation — plus continued disclosure for the part that stays unfixable.**
+This decision was revisited after an initial draft proposed disclosure alone.
+
+The distinction that makes a mechanism possible: Phase 1's problem was
+*disclosure* — a node reads the plaintext it serves — and that remains
+genuinely unfixable. Phase 2's *new* problem is *aggregation*: as a flow
+progresses, each successive node can see the original task and every prior
+model's output, so per-volunteer exposure grows with flow length even though
+no single hop reveals more than Phase 1 already did. Aggregation is tractable
+precisely because orchestration is client-side.
+
+Hardware mitigations were investigated and rejected as **unavailable, not
+undesirable**: GPU confidential computing (TEE) exists only on Hopper H100 and
+newer, and the Ampere A6000s this project actually runs on cannot do it at
+all; it further requires SEV-SNP/TDX CPUs, a specific virtualization stack,
+and an attestation service. A mechanism excluding every non-Hopper volunteer
+does not fit a network built on donated hardware. FHE is orders of magnitude
+too slow for inference.
+
+The mechanism adopted is **explicit per-hop context** ([ADR-0004](../../adr/0004-explicit-per-hop-context.md)):
+the client library records the whole flow locally but sends only what each
+call names. There is no implicit accumulator — the thing every conventional
+agent library does, and the thing that would make every node see everything.
+This makes the property *structural rather than a setting*: the library has no
+code path that sends unnamed content, so it cannot be left switched off. A
+"full context by default, opt in to restrict" design was rejected for exactly
+that reason — defaults decide real behavior, and almost nobody would restrict.
+The `Flow` additionally reports what each node and identity actually received,
+so the property can be checked rather than trusted.
+
+What this does **not** do: it does not make inference private. The node
+serving a hop still reads that hop. It narrows *how much* each volunteer
+sees, not *whether* they see it — and the documentation must keep saying so
+plainly rather than implying protection that does not exist.
 
 **Deliberately unchanged:** client authentication (still the single shared
 operator token — opening client-side access remains out of scope, as Phase 1
@@ -155,12 +180,16 @@ can start in parallel.
    `prompt` still works; sending both is rejected.
 2. **`list_models` discovery** — a client can list currently-served models
    without seeing node identities or reputation.
-3. **Multi-hop client library** (blocked by 1) — a client-side API that holds
-   context across calls. The primitive agents are written against.
+3. **Multi-hop client library with explicit per-hop context** (blocked by 1) —
+   a `Flow` that records the whole flow locally but sends only what each call
+   names ([ADR-0004](../../adr/0004-explicit-per-hop-context.md)), plus a
+   per-node/per-identity exposure report so the property is checkable. The
+   primitive agents are written against.
 4. **Reference agent** (blocked by 3) — one concrete two-model flow in
-   `examples/`, demonstrating the primitives compose.
-5. **Privacy disclosure update** — docs only; the multi-hop exposure, framed
-   honestly.
+   `examples/`, demonstrating the primitives compose and that a real agent is
+   workable under explicit-context rules.
+5. **Privacy documentation** — docs only; documents both the new mechanism and
+   the disclosure that survives it, without overclaiming.
 6. **Live verification + latency** (blocked by 4) — real hardware, two
    genuinely different models, real flow; measures per-hop and end-to-end
    latency, answering the phase doc's own open question with data. Matches
