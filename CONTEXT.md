@@ -92,3 +92,12 @@ How much of a flow one node, or one identity, actually received. The quantity
 Phase 2's explicit-context rule (ADR-0004) exists to minimize, and which the
 client can report per flow. Not the same as disclosure — a serving node always
 reads its own hop.
+
+**Handle**:
+An opaque identifier for a node or a bound identity, returned with each
+completion so a client can tell which hops one volunteer served. Derived
+under a secret the coordinator generates at startup, so a client can group
+by it but never resolve it to a public key, fingerprint or GitHub login.
+Not stable across a coordinator restart, and not the same thing as a
+fingerprint — which identifies a node *to the operator*.
+_Avoid_: id, fingerprint, token
