@@ -5,6 +5,7 @@ import hashlib
 import random
 import pytest
 
+from mycelium import crypto
 from mycelium.coordinator import github_identity
 from mycelium.coordinator.registry import (
     IdentityBanned,
@@ -653,3 +654,63 @@ async def test_ban_identity_only_bans_matching_identity():
     registry.ban_identity("x-user")
 
     registry.enforce_not_banned(identity_y)  # must not raise — a different identity
+
+
+async def test_handles_for_is_stable_across_calls():
+    registry = NodeRegistry("token", identity_verifier=_fake_verifier, handle_secret=b"s" * 32)
+    await registry.resolve_identity(PUBKEY_A, "valid-github-token")
+
+    assert registry.handles_for(PUBKEY_A) == registry.handles_for(PUBKEY_A)
+
+
+async def test_two_nodes_under_one_identity_share_an_identity_handle():
+    """The property the whole feature exists for: three nodes can be one
+    person, and the exposure report has to be able to say so."""
+    registry = NodeRegistry("token", identity_verifier=_fake_verifier, handle_secret=b"s" * 32)
+    await registry.resolve_identity(PUBKEY_A, "valid-github-token")
+    await registry.resolve_identity(PUBKEY_B, "valid-github-token")
+
+    handles_a = registry.handles_for(PUBKEY_A)
+    handles_b = registry.handles_for(PUBKEY_B)
+
+    assert handles_a["node_handle"] != handles_b["node_handle"]
+    assert handles_a["identity_handle"] == handles_b["identity_handle"]
+
+
+async def test_different_secrets_produce_different_handles():
+    one = NodeRegistry("token", identity_verifier=_fake_verifier, handle_secret=b"a" * 32)
+    two = NodeRegistry("token", identity_verifier=_fake_verifier, handle_secret=b"b" * 32)
+    await one.resolve_identity(PUBKEY_A, "valid-github-token")
+    await two.resolve_identity(PUBKEY_A, "valid-github-token")
+
+    assert one.handles_for(PUBKEY_A) != two.handles_for(PUBKEY_A)
+
+
+def test_handles_for_an_unbound_key_reports_a_null_identity_handle():
+    """Structurally shouldn't happen — registration always binds an
+    identity — but a completion must never fail because a reporting
+    field couldn't be built."""
+    registry = NodeRegistry("token", handle_secret=b"s" * 32)
+
+    handles = registry.handles_for(PUBKEY_A)
+
+    assert handles["node_handle"]
+    assert handles["identity_handle"] is None
+
+
+def test_handles_do_not_leak_the_key_the_fingerprint_or_the_login():
+    registry = NodeRegistry("token", handle_secret=b"s" * 32)
+
+    handles = registry.handles_for(PUBKEY_A)
+
+    assert handles["node_handle"] != PUBKEY_A
+    assert handles["node_handle"] != crypto.fingerprint(PUBKEY_A)
+
+
+def test_two_registries_without_an_injected_secret_differ():
+    """The default secret is per-process and random, so handles are not
+    comparable across a coordinator restart — see the design doc."""
+    one = NodeRegistry("token")
+    two = NodeRegistry("token")
+
+    assert one.handles_for(PUBKEY_A) != two.handles_for(PUBKEY_A)
