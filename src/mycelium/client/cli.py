@@ -111,6 +111,18 @@ def main() -> None:
         except (OSError, json.JSONDecodeError) as exc:
             print(f"error: could not read {args.messages_file}: {exc}", flush=True)
             sys.exit(1)
+        if messages is None:
+            # A file holding the JSON literal `null` parses without
+            # raising, leaving `messages` indistinguishable from "the flag
+            # was never given" downstream — caught here so the user sees
+            # what's actually wrong instead of complete()'s generic
+            # "not both or neither" flag error (issue #55).
+            print(
+                f"error: {args.messages_file} parsed to null, expected a "
+                "messages array",
+                flush=True,
+            )
+            sys.exit(1)
     try:
         text = asyncio.run(
             complete(

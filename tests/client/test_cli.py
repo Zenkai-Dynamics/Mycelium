@@ -198,3 +198,38 @@ def test_parse_args_requires_one_of_prompt_or_messages_file():
             "--coordinator-url", "wss://x", "--coordinator-cert", "c.pem",
             "--token-file", "t.txt", "--model", "m",
         ])
+
+
+def test_main_reports_a_clear_error_when_messages_file_parses_to_null(
+    tmp_path, monkeypatch, capsys
+):
+    # A messages file holding the JSON literal `null` parses without
+    # raising, leaving `messages` None exactly like "flag never given"
+    # would — main() must tell the user their file parsed to null rather
+    # than reporting the unrelated "not both or neither" flag error (see
+    # the design doc for issue #55).
+    cert_path = tmp_path / "cert.pem"
+    cert_path.write_text("placeholder")
+    token_file = tmp_path / "token"
+    token_file.write_text("secret")
+    messages_file = tmp_path / "messages.json"
+    messages_file.write_text("null")
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "mycelium-client",
+            "--coordinator-url", "wss://example:8765",
+            "--coordinator-cert", str(cert_path),
+            "--token-file", str(token_file),
+            "--model", "m",
+            "--messages-file", str(messages_file),
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        cli.main()
+
+    out = capsys.readouterr().out
+    assert str(messages_file) in out
+    assert "null" in out
