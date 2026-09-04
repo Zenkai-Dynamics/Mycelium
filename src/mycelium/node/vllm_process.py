@@ -1,5 +1,5 @@
 """Starts, monitors, and stops the local vLLM server process, and forwards
-prompts to it over HTTP.
+a messages array to it over HTTP.
 
 See the design doc for issue #7. This module owns the subprocess
 lifecycle of `vllm serve` and the local forwarding call — it has no
