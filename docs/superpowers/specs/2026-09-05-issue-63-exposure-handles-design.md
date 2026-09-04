@@ -86,7 +86,8 @@ start of the loop.
 
 | Outcome | Exposed? |
 |---|---|
-| Send raised (`NodeSendFailedError`) | no — nothing reached the node |
+| Send raised on an already-closed connection (`NodeSendFailedError`) | no — nothing reached the node |
+| Send raised part-way through (`NodeDroppedError`) | yes — the frame may already have hit the transport |
 | Dropped while awaiting reply (`NodeDroppedError`) | yes |
 | Timed out | yes — the node received it and may still be processing |
 | Node reported `complete_error` | yes |
@@ -107,10 +108,26 @@ case where the node probably read the request.
 Because failover can expose more than one node for a single hop, a hop's
 exposure is a **list**, not a single pair.
 
-One residual inaccuracy, recorded rather than papered over: a send that
-succeeds locally but dies before delivery is counted as exposure that never
-happened. The report errs toward over-reporting there, which is the right
-direction for a privacy report to err.
+Which of the two subclasses a failed send raises turns on the connection's
+state sampled *immediately before* the send, not on the send raising.
+`websockets` 17.0.1 (`asyncio/connection.py`, `Connection.send_context`)
+writes nothing at all when the connection is not `OPEN` on entry — that
+branch goes straight to raising `ConnectionClosed`. On an `OPEN`
+connection it instead calls `send_data()`, handing the frame to the
+transport, and only *then* awaits `drain()`; a failure during that drain
+raises `ConnectionClosed` **after** the bytes went to the socket. So a
+backpressured node whose connection dies during the drain may well have
+received the conversation. Only the not-`OPEN` case can honestly claim
+"nothing reached the node", so only it is `NodeSendFailedError`; a
+mid-send failure is a `NodeDroppedError` and counts as exposure.
+
+The residual inaccuracies, recorded rather than papered over, now all
+point the same way: a send that succeeds locally but dies before
+delivery, and a send that fails mid-flight having written nothing useful,
+are both counted as exposure that may never have happened. The report
+errs toward over-reporting, which is the right direction for a privacy
+report to err — under-reporting would be a false privacy claim in the
+flattering direction.
 
 ### Field presence
 

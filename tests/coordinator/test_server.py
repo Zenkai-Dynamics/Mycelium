@@ -10,6 +10,7 @@ import time
 
 import pytest
 import websockets
+from websockets.protocol import State
 
 from mycelium import crypto
 from mycelium.coordinator import certs, router, server
@@ -748,11 +749,19 @@ async def _run_fake_node(node_ws, reply_for) -> None:
 class _FakeNodeWebsocket:
     """Stand-in for a node's websocket, for testing
     server._handle_complete_request's failover logic in isolation from a
-    real network connection — mirrors test_router.py's _FakeNodeWebsocket."""
+    real network connection — mirrors test_router.py's _FakeNodeWebsocket.
 
-    def __init__(self, send_raises=None):
+    `state` mirrors websockets' own Connection.state. route_request
+    samples it before sending, so a fake that raises on send must also
+    say whether it was already dead (State.CLOSED — a genuine failed
+    send) or still OPEN (a mid-send failure, which counts as exposure).
+    See the design doc for issue #63.
+    """
+
+    def __init__(self, send_raises=None, state=State.OPEN):
         self.sent: list[str] = []
         self._send_raises = send_raises
+        self.state = state
 
     async def send(self, raw: str) -> None:
         if self._send_raises is not None:
@@ -1444,7 +1453,8 @@ async def test_complete_request_round_robins_across_two_healthy_nodes(tmp_path):
 async def test_complete_request_fails_over_to_healthy_node_when_first_pick_is_dead():
     registry = NodeRegistry("secret-token")
     dead_ws = _FakeNodeWebsocket(
-        send_raises=websockets.exceptions.ConnectionClosedError(None, None)
+        send_raises=websockets.exceptions.ConnectionClosedError(None, None),
+        state=State.CLOSED,
     )
     healthy_ws = _FakeNodeWebsocket()
     registry.register(PUBKEY_A, "node-a", "m", dead_ws)  # registers first -> round robin picks it first
@@ -1516,8 +1526,12 @@ async def test_complete_request_does_not_fail_over_on_timeout(monkeypatch):
 
 async def test_complete_request_returns_error_when_every_node_is_dead():
     registry = NodeRegistry("secret-token")
-    dead_a = _FakeNodeWebsocket(send_raises=websockets.exceptions.ConnectionClosedError(None, None))
-    dead_b = _FakeNodeWebsocket(send_raises=websockets.exceptions.ConnectionClosedError(None, None))
+    dead_a = _FakeNodeWebsocket(
+        send_raises=websockets.exceptions.ConnectionClosedError(None, None), state=State.CLOSED
+    )
+    dead_b = _FakeNodeWebsocket(
+        send_raises=websockets.exceptions.ConnectionClosedError(None, None), state=State.CLOSED
+    )
     registry.register(PUBKEY_A, "node-a", "m", dead_a)
     registry.register(PUBKEY_B, "node-b", "m", dead_b)
 

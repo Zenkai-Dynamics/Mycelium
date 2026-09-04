@@ -187,16 +187,23 @@ async def _handle_complete_request(websocket, registry: NodeRegistry, message: d
             )
         except router.NodeSendFailedError:
             # Nothing reached this node — it saw none of the content, so
-            # it is deliberately NOT added to `exposed`. See the design
-            # doc for issue #63.
+            # it is deliberately NOT added to `exposed`. route_request
+            # raises this only when the connection was demonstrably not
+            # OPEN before the send, which is the one case where websockets
+            # is guaranteed to have written no bytes; a send that failed
+            # part-way through arrives as NodeDroppedError below and does
+            # count as exposure. See the design doc for issue #63.
             registry.record_disconnect(node.public_key)
             registry.unregister(node.public_key, node.websocket)
             tried.add(node.public_key)
             continue
         except router.NodeDisconnectedError:
-            # NodeDroppedError: the node received the request and then
-            # died, so it very likely read the content. Reported as
-            # exposure even though it never answered.
+            # NodeDroppedError: the node may already have received the
+            # request — it died awaiting a reply, or the send failed on a
+            # connection that was still OPEN and so may have hit the wire.
+            # Reported as exposure even though it never answered: an
+            # ambiguous case counts as exposure. See the design doc for
+            # issue #63.
             exposed.append(registry.handles_for(node.public_key))
             registry.record_disconnect(node.public_key)
             registry.unregister(node.public_key, node.websocket)
