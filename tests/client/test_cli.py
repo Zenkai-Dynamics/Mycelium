@@ -78,7 +78,7 @@ async def test_complete_returns_text_on_success(tmp_path):
                 await node_ws.send(json.dumps({
                     "type": "complete_result",
                     "request_id": msg["request_id"],
-                    "text": f"echo: {msg['prompt']}",
+                    "text": f"echo: {msg['messages'][-1]['content']}",
                 }))
 
             node_task = asyncio.create_task(fake_node())

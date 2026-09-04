@@ -126,12 +126,18 @@ class VLLMProcess:
             time.sleep(HEALTH_POLL_INTERVAL_SECONDS)
         raise VLLMReadyTimeout(f"vLLM did not become healthy within {timeout}s")
 
-    def complete(self, prompt: str, timeout: float = COMPLETE_TIMEOUT_SECONDS) -> str:
-        """Forward a prompt to vLLM's OpenAI-compatible chat endpoint, return the completion text."""
+    def complete(self, messages: list[dict], timeout: float = COMPLETE_TIMEOUT_SECONDS) -> str:
+        """Forward a conversation to vLLM's OpenAI-compatible chat endpoint,
+        return the completion text.
+
+        Takes the `messages` array as-is rather than a bare prompt string:
+        as of issue #55 the coordinator is the single place that expands
+        the one-message `prompt` shorthand, so by the time a request
+        reaches a node it always carries real roles. This method no longer
+        constructs any part of the conversation itself.
+        """
         url = f"http://127.0.0.1:{self.port}/v1/chat/completions"
-        payload = json.dumps(
-            {"model": self.model, "messages": [{"role": "user", "content": prompt}]}
-        ).encode("utf-8")
+        payload = json.dumps({"model": self.model, "messages": messages}).encode("utf-8")
         request = urllib.request.Request(
             url, data=payload, headers={"Content-Type": "application/json"}, method="POST"
         )

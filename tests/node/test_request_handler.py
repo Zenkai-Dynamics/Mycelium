@@ -7,16 +7,16 @@ from mycelium.node.request_handler import handle_messages
 
 
 class _FakeProcess:
-    """Stand-in for VLLMProcess — records the prompt it was called with and
-    either returns a canned completion or raises."""
+    """Stand-in for VLLMProcess — records the messages array it was called
+    with and either returns a canned completion or raises."""
 
     def __init__(self, result=None, error=None):
-        self.calls: list[str] = []
+        self.calls: list[list[dict]] = []
         self._result = result
         self._error = error
 
-    def complete(self, prompt: str) -> str:
-        self.calls.append(prompt)
+    def complete(self, messages: list[dict]) -> str:
+        self.calls.append(messages)
         if self._error is not None:
             raise self._error
         return self._result
@@ -62,7 +62,11 @@ class _FakeWebsocket:
 async def test_handle_messages_replies_with_completion_on_success():
     process = _FakeProcess(result="the answer")
     websocket = _FakeWebsocket([
-        json.dumps({"type": "complete", "request_id": "abc", "prompt": "what's up?"})
+        json.dumps({
+            "type": "complete",
+            "request_id": "abc",
+            "messages": [{"role": "user", "content": "what's up?"}],
+        })
     ])
 
     handler_task = asyncio.create_task(handle_messages(websocket, process))
@@ -70,8 +74,28 @@ async def test_handle_messages_replies_with_completion_on_success():
     websocket.close_from_test()
     await handler_task
 
-    assert process.calls == ["what's up?"]
+    assert process.calls == [[{"role": "user", "content": "what's up?"}]]
     assert len(websocket.sent) == 1
+    reply = json.loads(websocket.sent[0])
+    assert reply == {"type": "complete_result", "request_id": "abc", "text": "the answer"}
+
+
+async def test_handle_messages_forwards_the_messages_array_to_the_process():
+    process = _FakeProcess(result="the answer")
+    messages = [
+        {"role": "system", "content": "be terse"},
+        {"role": "user", "content": "what's up?"},
+    ]
+    websocket = _FakeWebsocket([
+        json.dumps({"type": "complete", "request_id": "abc", "messages": messages})
+    ])
+
+    handler_task = asyncio.create_task(handle_messages(websocket, process))
+    await asyncio.sleep(0.05)  # let the spawned per-message task finish and reply
+    websocket.close_from_test()
+    await handler_task
+
+    assert process.calls == [messages]
     reply = json.loads(websocket.sent[0])
     assert reply == {"type": "complete_result", "request_id": "abc", "text": "the answer"}
 
@@ -79,7 +103,11 @@ async def test_handle_messages_replies_with_completion_on_success():
 async def test_handle_messages_replies_with_error_when_complete_raises():
     process = _FakeProcess(error=RuntimeError("vLLM exploded"))
     websocket = _FakeWebsocket([
-        json.dumps({"type": "complete", "request_id": "abc", "prompt": "hi"})
+        json.dumps({
+            "type": "complete",
+            "request_id": "abc",
+            "messages": [{"role": "user", "content": "hi"}],
+        })
     ])
 
     handler_task = asyncio.create_task(handle_messages(websocket, process))
@@ -120,8 +148,16 @@ async def test_handle_messages_ignores_malformed_json():
 async def test_handle_messages_handles_multiple_requests_concurrently():
     process = _FakeProcess(result="answer")
     websocket = _FakeWebsocket([
-        json.dumps({"type": "complete", "request_id": "1", "prompt": "first"}),
-        json.dumps({"type": "complete", "request_id": "2", "prompt": "second"}),
+        json.dumps({
+            "type": "complete",
+            "request_id": "1",
+            "messages": [{"role": "user", "content": "first"}],
+        }),
+        json.dumps({
+            "type": "complete",
+            "request_id": "2",
+            "messages": [{"role": "user", "content": "second"}],
+        }),
     ])
 
     handler_task = asyncio.create_task(handle_messages(websocket, process))
@@ -129,7 +165,7 @@ async def test_handle_messages_handles_multiple_requests_concurrently():
     websocket.close_from_test()
     await handler_task
 
-    assert sorted(process.calls) == ["first", "second"]
+    assert sorted(call[0]["content"] for call in process.calls) == ["first", "second"]
     request_ids = {json.loads(raw)["request_id"] for raw in websocket.sent}
     assert request_ids == {"1", "2"}
 

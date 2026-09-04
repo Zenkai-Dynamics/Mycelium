@@ -16,6 +16,8 @@ from mycelium.node.vllm_process import VLLMProcess, VLLMReadyTimeout
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
+RECEIVED_BODIES: list[dict] = []
+
 
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -52,7 +54,7 @@ class _FakeVLLMHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == "/v1/chat/completions":
             length = int(self.headers["Content-Length"])
-            self.rfile.read(length)
+            RECEIVED_BODIES.append(json.loads(self.rfile.read(length)))
             body = json.dumps(
                 {"choices": [{"message": {"content": "the answer is 42"}}]}
             ).encode()
@@ -94,8 +96,28 @@ def test_wait_ready_raises_on_timeout():
 def test_complete_returns_completion_content(fake_vllm_server):
     port = fake_vllm_server.server_address[1]
     process = VLLMProcess(port=port)
-    result = process.complete("What is the answer?")
+    result = process.complete([{"role": "user", "content": "What is the answer?"}])
     assert result == "the answer is 42"
+
+
+def test_complete_sends_the_messages_array_through_unchanged(fake_vllm_server):
+    RECEIVED_BODIES.clear()
+    port = fake_vllm_server.server_address[1]
+    process = VLLMProcess(model="test-model", port=port)
+
+    messages = [
+        {"role": "system", "content": "You are terse."},
+        {"role": "user", "content": "capital of France?"},
+        {"role": "assistant", "content": "Paris."},
+        {"role": "user", "content": "and of Spain?"},
+    ]
+    text = process.complete(messages)
+
+    assert text == "the answer is 42"
+    assert RECEIVED_BODIES[0]["messages"] == messages, (
+        "roles must survive to vLLM intact, not be flattened into one user message"
+    )
+    assert RECEIVED_BODIES[0]["model"] == "test-model"
 
 
 def _process_alive(pid: int) -> bool:

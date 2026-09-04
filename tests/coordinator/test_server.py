@@ -790,7 +790,7 @@ async def test_complete_request_routes_to_registered_node_and_returns_result(tmp
             await node_ws.send(json.dumps(payload))
             await node_ws.recv()  # consume "registered"
             node_task = asyncio.create_task(_run_fake_node(
-                node_ws, lambda msg: {"type": "complete_result", "text": f"echo: {msg['prompt']}"}
+                node_ws, lambda msg: {"type": "complete_result", "text": f"echo: {msg['messages'][-1]['content']}"}
             ))
 
             async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws:
@@ -939,7 +939,7 @@ async def test_complete_request_success_increments_completion_counter(tmp_path):
             await node_ws.send(json.dumps(payload))
             await node_ws.recv()
             node_task = asyncio.create_task(_run_fake_node(
-                node_ws, lambda msg: {"type": "complete_result", "text": f"echo: {msg['prompt']}"}
+                node_ws, lambda msg: {"type": "complete_result", "text": f"echo: {msg['messages'][-1]['content']}"}
             ))
 
             async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws:
@@ -1190,7 +1190,7 @@ async def test_superseded_node_connection_fails_only_its_own_pending_requests(tm
         # old connection's cleanup: route a fresh request through it and
         # confirm it gets a correct, normal reply.
         node_task = asyncio.create_task(_run_fake_node(
-            new_node_ws, lambda msg: {"type": "complete_result", "text": f"echo: {msg['prompt']}"}
+            new_node_ws, lambda msg: {"type": "complete_result", "text": f"echo: {msg['messages'][-1]['content']}"}
         ))
         async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as new_client_ws:
             await new_client_ws.send(json.dumps(
@@ -1272,11 +1272,11 @@ async def test_concurrent_complete_requests_to_same_node_get_correct_replies(tmp
                 second = json.loads(await node_ws.recv())
                 await node_ws.send(json.dumps({
                     "type": "complete_result", "request_id": second["request_id"],
-                    "text": f"reply to: {second['prompt']}",
+                    "text": f"reply to: {second['messages'][-1]['content']}",
                 }))
                 await node_ws.send(json.dumps({
                     "type": "complete_result", "request_id": first["request_id"],
-                    "text": f"reply to: {first['prompt']}",
+                    "text": f"reply to: {first['messages'][-1]['content']}",
                 }))
 
             node_task = asyncio.create_task(flaky_reversing_node())
@@ -1313,7 +1313,7 @@ async def test_complete_request_round_robins_across_two_healthy_nodes(tmp_path):
             await node_a_ws.send(json.dumps(payload_a))
             await node_a_ws.recv()
             node_a_task = asyncio.create_task(_run_fake_node(
-                node_a_ws, lambda msg: {"type": "complete_result", "text": f"node-a: {msg['prompt']}"}
+                node_a_ws, lambda msg: {"type": "complete_result", "text": f"node-a: {msg['messages'][-1]['content']}"}
             ))
 
             async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as node_b_ws:
@@ -1321,7 +1321,7 @@ async def test_complete_request_round_robins_across_two_healthy_nodes(tmp_path):
                 await node_b_ws.send(json.dumps(payload_b))
                 await node_b_ws.recv()
                 node_b_task = asyncio.create_task(_run_fake_node(
-                    node_b_ws, lambda msg: {"type": "complete_result", "text": f"node-b: {msg['prompt']}"}
+                    node_b_ws, lambda msg: {"type": "complete_result", "text": f"node-b: {msg['messages'][-1]['content']}"}
                 ))
 
                 # Two separate connections, one per request: a client

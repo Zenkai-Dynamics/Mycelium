@@ -162,7 +162,9 @@ async def _handle_complete_request(websocket, registry: NodeRegistry, message: d
             # Production behavior is unchanged — the constant is never
             # mutated after import there.
             text = await router.route_request(
-                node, prompt, timeout=router.NODE_COMPLETE_TIMEOUT_SECONDS
+                node,
+                [{"role": "user", "content": prompt}],
+                timeout=router.NODE_COMPLETE_TIMEOUT_SECONDS,
             )
         except router.NodeDisconnectedError:
             # The picked node is actually dead — self-heal the registry
