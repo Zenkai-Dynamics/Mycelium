@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import ssl
+import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
@@ -124,14 +125,31 @@ async def _handle_complete_request(websocket, registry: NodeRegistry, message: d
     not retried: the node might still be working, and silently re-running
     the same prompt on a second node risks double-executing it. Each
     outcome (completion/timeout/crash/disconnect) is recorded against the
-    node that produced it — see the design doc for issue #36."""
+    node that produced it — see the design doc for issue #36.
+
+    Every reply also reports which nodes actually received the request
+    (`exposed`, a list of opaque per-node/per-identity handles — never a
+    public key, fingerprint, or GitHub login) and how long the whole
+    retry loop took (`elapsed_ms`, present only once at least one node
+    was attempted). A node is exposed the moment the request bytes leave
+    the coordinator for it, whether or not it ever replies: a node that
+    received the request and then timed out, dropped, or reported a
+    failure read the content either way, but a node whose send never
+    landed did not. See the design doc for issue #63."""
     if not registry.check_token(message.get("token")):
         await websocket.close()
         return
 
+    exposed: list[dict] = []
+    attempts = 0
+    started = time.monotonic()
+
     async def reject(reason: str) -> None:
+        reply = {"type": "complete_error", "reason": reason, "exposed": exposed}
+        if attempts:
+            reply["elapsed_ms"] = int((time.monotonic() - started) * 1000)
         try:
-            await websocket.send(json.dumps({"type": "complete_error", "reason": reason}))
+            await websocket.send(json.dumps(reply))
         except websockets.exceptions.ConnectionClosed:
             return
         await websocket.close()
@@ -156,6 +174,7 @@ async def _handle_complete_request(websocket, registry: NodeRegistry, message: d
             node = registry.find_node_for_model(model, exclude=frozenset(tried))
             if node is None:
                 raise router.NoHealthyNodeError(f"no healthy node for model {model!r}")
+            attempts += 1
             # Passed explicitly (not relying on route_request's own default)
             # so tests can monkeypatch router.NODE_COMPLETE_TIMEOUT_SECONDS
             # and have it actually take effect: Python binds a default
@@ -166,19 +185,30 @@ async def _handle_complete_request(websocket, registry: NodeRegistry, message: d
             text = await router.route_request(
                 node, messages, timeout=router.NODE_COMPLETE_TIMEOUT_SECONDS
             )
+        except router.NodeSendFailedError:
+            # Nothing reached this node — it saw none of the content, so
+            # it is deliberately NOT added to `exposed`. See the design
+            # doc for issue #63.
+            registry.record_disconnect(node.public_key)
+            registry.unregister(node.public_key, node.websocket)
+            tried.add(node.public_key)
+            continue
         except router.NodeDisconnectedError:
-            # The picked node is actually dead — self-heal the registry
-            # right away (don't wait for #9's ping/pong timeout) and try a
-            # different healthy node instead of failing the request.
+            # NodeDroppedError: the node received the request and then
+            # died, so it very likely read the content. Reported as
+            # exposure even though it never answered.
+            exposed.append(registry.handles_for(node.public_key))
             registry.record_disconnect(node.public_key)
             registry.unregister(node.public_key, node.websocket)
             tried.add(node.public_key)
             continue
         except router.NodeTimeoutError as exc:
+            exposed.append(registry.handles_for(node.public_key))
             registry.record_timeout(node.public_key)
             await reject(str(exc))
             return
         except router.NodeError as exc:
+            exposed.append(registry.handles_for(node.public_key))
             registry.record_crash(node.public_key)
             await reject(str(exc))
             return
@@ -186,11 +216,18 @@ async def _handle_complete_request(websocket, registry: NodeRegistry, message: d
             await reject(str(exc))
             return
         else:
+            exposed.append(registry.handles_for(node.public_key))
             registry.record_completion(node.public_key)
             break
 
+    reply = {
+        "type": "complete_result",
+        "text": text,
+        "exposed": exposed,
+        "elapsed_ms": int((time.monotonic() - started) * 1000),
+    }
     try:
-        await websocket.send(json.dumps({"type": "complete_result", "text": text}))
+        await websocket.send(json.dumps(reply))
     except websockets.exceptions.ConnectionClosed:
         return
     await websocket.close()
@@ -390,6 +427,7 @@ def serve(
     token: str,
     identity_verifier: Callable[[str], Awaitable] | None = None,
     per_identity_cap: int | None = None,
+    handle_secret: bytes | None = None,
 ):
     """Start the coordinator's node-facing WebSocket server.
 
@@ -407,6 +445,11 @@ def serve(
     None-accepting parameter — `None >= 3` would raise inside
     enforce_identity_cap if passed through unconditionally.
 
+    handle_secret overrides NodeRegistry's own randomly-generated
+    per-process exposure-handle secret — production callers leave it
+    unset; tests inject a fixed secret so the resulting handles are
+    assertable. See the design doc for issue #63.
+
     Returns whatever `websockets.serve` returns: awaitable to get a `Server`
     instance directly, or usable as `async with serve(...) as server:`.
     """
@@ -415,6 +458,7 @@ def serve(
         token,
         identity_verifier=identity_verifier,
         per_identity_cap=per_identity_cap if per_identity_cap is not None else 3,
+        handle_secret=handle_secret,
     )
 
     async def handler(websocket):
