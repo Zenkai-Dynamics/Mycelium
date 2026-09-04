@@ -48,13 +48,13 @@ async def _handle_complete(websocket, process: VLLMProcess, raw: str) -> None:
         return
 
     request_id = message.get("request_id")
-    prompt = message.get("prompt")
+    messages = message.get("messages")
     try:
         # Broad except is deliberate here, not sloppy: whatever goes wrong
         # calling vLLM (HTTP error, timeout, malformed response) becomes a
         # complete_error the coordinator/client can see, per the design
         # doc for issue #10 — never left to hang or crash this task.
-        text = await asyncio.to_thread(process.complete, prompt)
+        text = await asyncio.to_thread(process.complete, messages)
     except Exception as exc:
         reply = {"type": "complete_error", "request_id": request_id, "reason": str(exc)}
     else:

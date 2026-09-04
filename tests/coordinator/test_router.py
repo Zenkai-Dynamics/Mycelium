@@ -40,12 +40,14 @@ async def test_route_request_sends_a_complete_message_with_request_id():
     node = _make_node()
     asyncio.create_task(_resolve_after(node, 0.05, {"type": "complete_result", "text": "hi"}))
 
-    await router.route_request(node, "what's up?", timeout=2.0)
+    await router.route_request(
+        node, [{"role": "user", "content": "what's up?"}], timeout=2.0
+    )
 
     assert len(node.websocket.sent) == 1
     sent = json.loads(node.websocket.sent[0])
     assert sent["type"] == "complete"
-    assert sent["prompt"] == "what's up?"
+    assert sent["messages"] == [{"role": "user", "content": "what's up?"}]
     assert isinstance(sent["request_id"], str) and sent["request_id"]
 
 
@@ -55,7 +57,7 @@ async def test_route_request_returns_text_on_success():
         _resolve_after(node, 0.05, {"type": "complete_result", "text": "the answer"})
     )
 
-    text = await router.route_request(node, "prompt", timeout=2.0)
+    text = await router.route_request(node, [{"role": "user", "content": "prompt"}], timeout=2.0)
 
     assert text == "the answer"
 
@@ -64,7 +66,7 @@ async def test_route_request_cleans_up_pending_on_success():
     node = _make_node()
     asyncio.create_task(_resolve_after(node, 0.05, {"type": "complete_result", "text": "hi"}))
 
-    await router.route_request(node, "prompt", timeout=2.0)
+    await router.route_request(node, [{"role": "user", "content": "prompt"}], timeout=2.0)
 
     assert node.pending == {}
 
@@ -76,7 +78,7 @@ async def test_route_request_raises_node_error_when_node_reports_failure():
     )
 
     with pytest.raises(router.NodeError, match="vLLM exploded"):
-        await router.route_request(node, "prompt", timeout=2.0)
+        await router.route_request(node, [{"role": "user", "content": "prompt"}], timeout=2.0)
 
     assert node.pending == {}
 
@@ -85,7 +87,7 @@ async def test_route_request_raises_timeout_when_no_reply_arrives():
     node = _make_node()
 
     with pytest.raises(router.NodeTimeoutError):
-        await router.route_request(node, "prompt", timeout=0.1)
+        await router.route_request(node, [{"role": "user", "content": "prompt"}], timeout=0.1)
 
     assert node.pending == {}
 
@@ -97,7 +99,7 @@ async def test_route_request_raises_disconnected_when_send_fails():
     node = _make_node(websocket)
 
     with pytest.raises(router.NodeDisconnectedError):
-        await router.route_request(node, "prompt", timeout=2.0)
+        await router.route_request(node, [{"role": "user", "content": "prompt"}], timeout=2.0)
 
     assert node.pending == {}
 
@@ -115,7 +117,7 @@ async def test_route_request_propagates_disconnected_error_set_on_future():
     asyncio.create_task(fail_soon())
 
     with pytest.raises(router.NodeDisconnectedError, match="disconnected mid-request"):
-        await router.route_request(node, "prompt", timeout=2.0)
+        await router.route_request(node, [{"role": "user", "content": "prompt"}], timeout=2.0)
 
     assert node.pending == {}
 
@@ -125,9 +127,25 @@ async def test_route_request_raises_node_error_when_complete_result_missing_text
     asyncio.create_task(_resolve_after(node, 0.05, {"type": "complete_result"}))
 
     with pytest.raises(router.NodeError, match="malformed complete_result"):
-        await router.route_request(node, "prompt", timeout=2.0)
+        await router.route_request(node, [{"role": "user", "content": "prompt"}], timeout=2.0)
 
     assert node.pending == {}
+
+
+async def test_route_request_sends_the_messages_array_to_the_node():
+    messages = [
+        {"role": "system", "content": "be terse"},
+        {"role": "user", "content": "hi"},
+    ]
+    node = _make_node()
+    asyncio.create_task(_resolve_after(node, 0.05, {"type": "complete_result", "text": "ok"}))
+
+    text = await router.route_request(node, messages, timeout=2.0)
+
+    sent = json.loads(node.websocket.sent[0])
+    assert sent["messages"] == messages
+    assert "prompt" not in sent, "the node wire carries messages only, as of issue #55"
+    assert text == "ok"
 
 
 def test_all_router_errors_are_routing_errors():

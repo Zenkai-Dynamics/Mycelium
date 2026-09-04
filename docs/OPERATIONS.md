@@ -295,6 +295,48 @@ disconnected, the coordinator silently retries a different healthy node
 before giving up — you'll never see that as a client-visible error as
 long as another healthy node for the same model exists.
 
+### Sending a multi-turn conversation
+
+`--prompt` is shorthand for a single user message. To send a conversation
+with roles intact — a system instruction, prior turns, or a previous
+model's output — write the array to a file and pass `--messages-file`:
+
+```json
+[
+  {"role": "system", "content": "You answer in one sentence."},
+  {"role": "user", "content": "What is the capital of France?"},
+  {"role": "assistant", "content": "Paris."},
+  {"role": "user", "content": "And of Spain?"}
+]
+```
+
+```bash
+mycelium-client \
+  --coordinator-url wss://coordinator.example:8765 \
+  --coordinator-cert coordinator.pem \
+  --token-file client-token.txt \
+  --model Qwen/Qwen2.5-7B-Instruct \
+  --messages-file conversation.json
+```
+
+The roles reach the model intact rather than being flattened into one
+blob, which is what chat-tuned models are trained to expect.
+
+`--prompt` and `--messages-file` are mutually exclusive. Sending both is
+rejected rather than resolved by a precedence rule: a request that sets
+both is ambiguous, and silently dropping one of them is exactly the bug
+that is painful to trace back from a wrong answer.
+
+`role` is not restricted to `system`/`user`/`assistant` — any non-empty
+string is passed through, since chat templates use others. Each entry
+must be an object with a string `role` and a string `content`; anything
+else comes back as a `complete_error` — naming the offending index for a
+malformed entry, or describing the whole array for a malformed list
+(e.g. empty).
+
+Keeping the conversation within the model's context window is the
+caller's job. The node never silently truncates.
+
 ## Step 6 — Ban a misbehaving identity (operator override)
 
 If a volunteer's node needs to be removed for cause — e.g. a report of

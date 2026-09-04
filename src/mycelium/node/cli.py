@@ -157,7 +157,13 @@ async def _run(
         print("vLLM ready", flush=True)
 
         if args.prompt is not None:
-            result = await asyncio.to_thread(process.complete, args.prompt)
+            # A standalone local diagnostic, not a coordinator-routed
+            # request: no coordinator is involved to do the prompt ->
+            # messages normalization (see the design doc for issue #55),
+            # so this one call site builds the one-message array itself.
+            result = await asyncio.to_thread(
+                process.complete, [{"role": "user", "content": args.prompt}]
+            )
             print(result, flush=True)
             return
 

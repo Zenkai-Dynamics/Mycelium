@@ -2,8 +2,8 @@
 coordinator connection and returns its response.
 
 See the design doc for issue #10. This module owns exactly one exchange
-per call: send {"type": "complete", "request_id", "prompt"} on the node's
-websocket, wait for a correlated reply. Picking *which* node (or
+per call: send {"type": "complete", "request_id", "messages"} on the
+node's websocket, wait for a correlated reply. Picking *which* node (or
 discovering there isn't a healthy one) is the caller's job
 (mycelium.coordinator.registry.find_node_for_model) — that's why
 NoHealthyNodeError lives here as part of this feature's error taxonomy
@@ -56,10 +56,15 @@ class NodeError(RoutingError):
 
 
 async def route_request(
-    node: Node, prompt: str, timeout: float = NODE_COMPLETE_TIMEOUT_SECONDS
+    node: Node, messages: list[dict], timeout: float = NODE_COMPLETE_TIMEOUT_SECONDS
 ) -> str:
-    """Send `prompt` to `node` over its already-open connection and return
-    its completion text.
+    """Send `messages` to `node` over its already-open connection and
+    return its completion text.
+
+    Carries the conversation as an array of {role, content} rather than a
+    bare prompt string — see the design doc for issue #55. The coordinator
+    has already expanded any `prompt` shorthand by the time this is
+    called, so the node wire has exactly one shape.
 
     Raises NodeDisconnectedError if the connection is or becomes unusable,
     NodeTimeoutError if no reply arrives within `timeout`, or NodeError if
@@ -72,7 +77,9 @@ async def route_request(
     try:
         try:
             await node.websocket.send(
-                json.dumps({"type": "complete", "request_id": request_id, "prompt": prompt})
+                json.dumps(
+                    {"type": "complete", "request_id": request_id, "messages": messages}
+                )
             )
         except websockets.exceptions.ConnectionClosed as exc:
             raise NodeDisconnectedError(f"node {node.node_id!r} disconnected: {exc}") from exc

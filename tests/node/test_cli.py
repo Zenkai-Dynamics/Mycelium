@@ -117,6 +117,9 @@ def test_parse_args_github_token_file_override(tmp_path):
     assert str(args.github_token_file) == str(github_token_file)
 
 
+RECEIVED_BODIES: list[dict] = []
+
+
 class _FakeVLLMHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
@@ -129,7 +132,7 @@ class _FakeVLLMHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == "/v1/chat/completions":
             length = int(self.headers["Content-Length"])
-            self.rfile.read(length)
+            RECEIVED_BODIES.append(json.loads(self.rfile.read(length)))
             body = json.dumps(
                 {"choices": [{"message": {"content": "fake completion"}}]}
             ).encode()
@@ -173,6 +176,7 @@ def _process_alive(pid: int) -> bool:
 async def test_run_prompt_mode_forwards_prompt_and_prints_completion(
     monkeypatch, capsys, fake_vllm_server
 ):
+    RECEIVED_BODIES.clear()
     port = fake_vllm_server.server_address[1]
     monkeypatch.setattr(
         vllm_process, "build_command", lambda model, port_: [sys.executable, "-c", "import time; time.sleep(600)"]
@@ -183,6 +187,9 @@ async def test_run_prompt_mode_forwards_prompt_and_prints_completion(
     await _run(args, process)
 
     assert "fake completion" in capsys.readouterr().out
+    assert RECEIVED_BODIES[0]["messages"] == [
+        {"role": "user", "content": "what is the answer?"}
+    ], "--prompt must be wrapped into a messages array, not sent as a bare string (issue #55)"
 
 
 def _server_ssl_context(cert_path, key_path):
@@ -510,6 +517,7 @@ async def test_run_prints_stale_token_hint_naming_the_explicit_token_file_when_o
 
 
 async def test_run_answers_a_routed_complete_request(tmp_path, monkeypatch, fake_vllm_server):
+    RECEIVED_BODIES.clear()
     vllm_port = fake_vllm_server.server_address[1]
     monkeypatch.setattr(
         vllm_process, "build_command", lambda model, port_: [sys.executable, "-c", "import time; time.sleep(600)"]
@@ -527,8 +535,14 @@ async def test_run_answers_a_routed_complete_request(tmp_path, monkeypatch, fake
     async def fake_coordinator(websocket):
         await websocket.recv()  # registration
         await websocket.send(json.dumps({"type": "registered"}))
+        # A coordinator only ever sends "messages" on this path — it is the
+        # single normalization point and expands any "prompt" shorthand
+        # itself before forwarding (see the design doc for issue #55).
         await websocket.send(json.dumps(
-            {"type": "complete", "request_id": "req-1", "prompt": "what is the answer?"}
+            {
+                "type": "complete", "request_id": "req-1",
+                "messages": [{"role": "user", "content": "what is the answer?"}],
+            }
         ))
         received_reply.update(json.loads(await websocket.recv()))
         reply_event.set()
@@ -559,6 +573,9 @@ async def test_run_answers_a_routed_complete_request(tmp_path, monkeypatch, fake
     assert received_reply == {
         "type": "complete_result", "request_id": "req-1", "text": "fake completion",
     }
+    assert RECEIVED_BODIES[0]["messages"] == [
+        {"role": "user", "content": "what is the answer?"}
+    ], "the node must forward the messages array it was routed unchanged, not a bare prompt"
 
 
 async def test_run_retries_after_registration_rejected(tmp_path, monkeypatch, fake_vllm_server):
