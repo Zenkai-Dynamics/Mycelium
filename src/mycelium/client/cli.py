@@ -37,7 +37,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--coordinator-cert", type=Path, required=True)
     parser.add_argument("--token-file", type=Path, required=True)
     parser.add_argument("--model", required=True)
-    parser.add_argument("--prompt", required=True)
+    # Mutually exclusive and required: the wire rejects both-set as
+    # ambiguous (issue #55), so the CLI refuses to build such a request
+    # in the first place rather than making the user learn that by
+    # round-tripping.
+    content = parser.add_mutually_exclusive_group(required=True)
+    content.add_argument("--prompt")
+    content.add_argument(
+        "--messages-file",
+        type=Path,
+        help="path to a JSON file holding a [{\"role\": ..., \"content\": ...}, ...] array",
+    )
     return parser.parse_args(argv)
 
 
@@ -46,19 +56,33 @@ async def complete(
     coordinator_cert: Path,
     token: str,
     model: str,
-    prompt: str,
+    prompt: str | None = None,
+    messages: list[dict] | None = None,
     timeout: float = CLIENT_COMPLETE_TIMEOUT_SECONDS,
 ) -> str:
-    """Send one prompt to the coordinator and return the completion text.
+    """Send one prompt or conversation to the coordinator and return the
+    completion text.
 
-    Raises CompletionError if the coordinator rejects the request, the
-    routed node fails or is unavailable, or no response arrives in time.
+    Exactly one of `prompt` or `messages` must be given — the same rule the
+    wire enforces (see the design doc for issue #55), checked here so an
+    ambiguous request fails locally instead of after a round trip.
+
+    Raises CompletionError if the request is ambiguous, the coordinator
+    rejects it, the routed node fails or is unavailable, or no response
+    arrives in time.
     """
+    if (prompt is None) == (messages is None):
+        raise CompletionError("send either prompt or messages, not both or neither")
+
+    request = {"type": "complete", "token": token, "model": model}
+    if prompt is not None:
+        request["prompt"] = prompt
+    else:
+        request["messages"] = messages
+
     ssl_context = build_ssl_context(coordinator_cert)
     async with websockets.connect(coordinator_url, ssl=ssl_context) as websocket:
-        await websocket.send(json.dumps(
-            {"type": "complete", "token": token, "model": model, "prompt": prompt}
-        ))
+        await websocket.send(json.dumps(request))
         try:
             async with asyncio.timeout(timeout):
                 raw = await websocket.recv()
@@ -80,9 +104,19 @@ async def complete(
 def main() -> None:
     args = parse_args()
     token = args.token_file.read_text().strip()
+    messages = None
+    if args.messages_file is not None:
+        try:
+            messages = json.loads(args.messages_file.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"error: could not read {args.messages_file}: {exc}", flush=True)
+            sys.exit(1)
     try:
         text = asyncio.run(
-            complete(args.coordinator_url, args.coordinator_cert, token, args.model, args.prompt)
+            complete(
+                args.coordinator_url, args.coordinator_cert, token, args.model,
+                prompt=args.prompt, messages=messages,
+            )
         )
     except CompletionError as exc:
         print(f"error: {exc}", flush=True)
