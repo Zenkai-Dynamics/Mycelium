@@ -104,6 +104,38 @@ async def test_route_request_raises_disconnected_when_send_fails():
     assert node.pending == {}
 
 
+async def test_send_failure_raises_node_send_failed():
+    node = _make_node(_FakeNodeWebsocket(send_raises=ConnectionClosedError(None, None)))
+
+    with pytest.raises(router.NodeSendFailedError):
+        await router.route_request(node, [{"role": "user", "content": "hi"}], timeout=2.0)
+
+
+async def test_send_failure_is_still_a_node_disconnected_error():
+    """Both new classes subclass NodeDisconnectedError so the
+    coordinator's existing failover branch is untouched."""
+    node = _make_node(_FakeNodeWebsocket(send_raises=ConnectionClosedError(None, None)))
+
+    with pytest.raises(router.NodeDisconnectedError):
+        await router.route_request(node, [{"role": "user", "content": "hi"}], timeout=2.0)
+
+
+async def test_drop_while_awaiting_reply_raises_node_dropped():
+    """The distinction that matters for exposure: this node received the
+    request, so it must be reported as having seen the content."""
+    node = _make_node()
+
+    async def drop_after(delay):
+        await asyncio.sleep(delay)
+        (request_id,) = node.pending.keys()
+        node.pending[request_id].set_exception(router.NodeDroppedError("node dropped"))
+
+    asyncio.create_task(drop_after(0.05))
+
+    with pytest.raises(router.NodeDroppedError):
+        await router.route_request(node, [{"role": "user", "content": "hi"}], timeout=2.0)
+
+
 async def test_route_request_propagates_disconnected_error_set_on_future():
     node = _make_node()
 

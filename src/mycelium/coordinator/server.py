@@ -371,7 +371,7 @@ async def _handle_registration(websocket, registry: NodeRegistry, message: dict)
         for pending_future in node.pending.values():
             if not pending_future.done():
                 pending_future.set_exception(
-                    router.NodeDisconnectedError(f"node {node_id!r} disconnected mid-request")
+                    router.NodeDroppedError(f"node {node_id!r} disconnected mid-request")
                 )
 
 

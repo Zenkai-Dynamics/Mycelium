@@ -45,8 +45,29 @@ class NodeTimeoutError(RoutingError):
 class NodeDisconnectedError(RoutingError):
     """Raised when the node's connection is (or becomes) unusable — either
     it was already closed when we tried to send, or it closed while we
-    were waiting for a reply. A caller shouldn't need to (and can't)
-    distinguish those two cases."""
+    were waiting for a reply. Catch this when all you care about is that
+    the node is unusable and another one should be tried; catch one of
+    its two subclasses below when it matters whether the node actually
+    saw the request's content."""
+
+
+class NodeSendFailedError(NodeDisconnectedError):
+    """The connection was already unusable when we tried to send — so
+    nothing reached the node, and it saw none of the request's content.
+
+    Split out of NodeDisconnectedError for issue #63: this module's
+    docstring used to say a caller "shouldn't need to (and can't)"
+    distinguish a failed send from a mid-flight drop, which was true
+    until exposure reporting existed. It is a subclass, so callers that
+    only care about "this node is gone, try another" are unaffected.
+    """
+
+
+class NodeDroppedError(NodeDisconnectedError):
+    """The connection died while we were awaiting a reply — so the node
+    very likely received and began processing the request, and must be
+    reported as having seen its content. See the design doc for issue
+    #63."""
 
 
 class NodeError(RoutingError):
@@ -82,7 +103,7 @@ async def route_request(
                 )
             )
         except websockets.exceptions.ConnectionClosed as exc:
-            raise NodeDisconnectedError(f"node {node.node_id!r} disconnected: {exc}") from exc
+            raise NodeSendFailedError(f"node {node.node_id!r} disconnected: {exc}") from exc
 
         try:
             async with asyncio.timeout(timeout):
