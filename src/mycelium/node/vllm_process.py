@@ -51,6 +51,54 @@ class VLLMReadyTimeout(Exception):
     before becoming healthy."""
 
 
+# 4xx codes that are the NODE's fault despite being client-error codes:
+# 404 means vLLM isn't serving the model this node registered (a
+# misconfiguration), and 408/429 mean the node is too busy to serve.
+# Classifying these as client faults would shield a node that genuinely
+# cannot serve from ever reflecting it in its reputation — the mirror
+# image of the bug issue #58 exists to fix. See the design doc for #58.
+NODE_FAULT_STATUSES = frozenset({404, 408, 429})
+
+
+class VLLMClientError(Exception):
+    """vLLM rejected the request itself — most often context exceeding the
+    model's window. The caller's mistake, not the node's, so it must never
+    be recorded against this node's reputation. See the design doc for
+    issue #58."""
+
+
+class VLLMServerError(Exception):
+    """vLLM failed for a reason that is the node's own — a 5xx, or one of
+    NODE_FAULT_STATUSES. Recorded against reputation exactly as any other
+    node failure."""
+
+
+def _error_message(body: bytes, status: int) -> str:
+    """Pull the human-readable message out of vLLM's error body.
+
+    vLLM returns `message` at the top level; some OpenAI-compatible
+    servers nest it under `error`. Both are read, and anything
+    unparseable falls back to the raw text — an unexpected error shape
+    must still produce something a caller can act on rather than an empty
+    string. See the design doc for issue #58.
+    """
+    try:
+        parsed = json.loads(body)
+    except (ValueError, TypeError):
+        parsed = None
+    if isinstance(parsed, dict):
+        message = parsed.get("message")
+        if isinstance(message, str) and message:
+            return message
+        error = parsed.get("error")
+        if isinstance(error, dict):
+            nested = error.get("message")
+            if isinstance(nested, str) and nested:
+                return nested
+    text = body.decode("utf-8", errors="replace").strip()
+    return text or f"vLLM returned HTTP {status} with no message"
+
+
 class VLLMProcess:
     """Manages one `vllm serve` subprocess and forwards prompts to it."""
 
@@ -141,6 +189,17 @@ class VLLMProcess:
         request = urllib.request.Request(
             url, data=payload, headers={"Content-Type": "application/json"}, method="POST"
         )
-        with urllib.request.urlopen(request, timeout=timeout) as resp:
-            body = json.loads(resp.read())
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as resp:
+                body = json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            # Only HTTP responses are classified here. Transport failures
+            # (URLError, socket timeouts) propagate unchanged and are
+            # treated as node faults by request_handler's catch-all —
+            # there is no client-caused way to make the local loopback
+            # connection to vLLM fail. See the design doc for issue #58.
+            message = _error_message(exc.read(), exc.code)
+            if 400 <= exc.code < 500 and exc.code not in NODE_FAULT_STATUSES:
+                raise VLLMClientError(message) from exc
+            raise VLLMServerError(message) from exc
         return body["choices"][0]["message"]["content"]
