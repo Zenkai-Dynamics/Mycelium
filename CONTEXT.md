@@ -101,3 +101,12 @@ by it but never resolve it to a public key, fingerprint or GitHub login.
 Not stable across a coordinator restart, and not the same thing as a
 fingerprint — which identifies a node *to the operator*.
 _Avoid_: id, fingerprint, token
+
+**Fault**:
+Whose mistake a failure was: the client's (a malformed request, context
+exceeding the model's window) or the node's (a crash, a timeout, a model it
+isn't serving). Deliberately not the same as *who failed* — a node reports a
+client fault for a request it served correctly and the model refused. Never a
+judgement about the quality of a completion, which nothing in Mycelium
+measures.
+_Avoid_: error, blame, cause
