@@ -121,9 +121,15 @@ async def route_request(
     called, so the node wire has exactly one shape.
 
     Raises NodeDisconnectedError if the connection is or becomes unusable,
-    NodeTimeoutError if no reply arrives within `timeout`, or NodeError if
-    the node explicitly reports a failure. `node.pending` never retains an
-    entry for this request once this function returns or raises.
+    NodeTimeoutError if no reply arrives within `timeout`, NodeError if
+    the node explicitly reports a failure, or ClientRequestError if the
+    node reports that failure was the client's own fault (e.g. context
+    exceeding the model's window). ClientRequestError is deliberately not
+    a NodeError, so a caller distinguishing the two by `except NodeError`
+    must add a separate branch rather than silently treating a client's
+    mistake as the node's — see the design doc for issue #58.
+    `node.pending` never retains an entry for this request once this
+    function returns or raises.
 
     NodeDisconnectedError is never raised directly: it always arrives as
     one of its two subclasses, and which one is the difference between a
