@@ -95,6 +95,20 @@ class NodeError(RoutingError):
     timing out or disconnecting."""
 
 
+class ClientRequestError(RoutingError):
+    """The node reported that the CLIENT's request was at fault — most
+    often context exceeding the model's window.
+
+    Deliberately NOT a subclass of NodeError: an existing `except
+    NodeError` site records a crash against the node, and a client's own
+    mistake must never do that. See the design doc for issue #58.
+
+    Raised only when the reply says exactly "client". An absent or
+    unrecognized value is a NodeError, so a node cannot dodge reputation
+    by sending garbage in place of a valid claim.
+    """
+
+
 async def route_request(
     node: Node, messages: list[dict], timeout: float = NODE_COMPLETE_TIMEOUT_SECONDS
 ) -> str:
@@ -172,4 +186,8 @@ async def route_request(
     # with a "complete_result" or "complete_error" message — anything else
     # coming out of `await future` above is a set_exception, not this
     # branch — so this is always a complete_error at this point.
+    if message.get("fault") == "client":
+        raise ClientRequestError(
+            message.get("reason", "the model rejected the request with no reason given")
+        )
     raise NodeError(message.get("reason", "node reported a failure with no reason given"))

@@ -135,7 +135,17 @@ async def _handle_complete_request(websocket, registry: NodeRegistry, message: d
     the coordinator for it, whether or not it ever replies: a node that
     received the request and then timed out, dropped, or reported a
     failure read the content either way, but a node whose send never
-    landed did not. See the design doc for issue #63."""
+    landed did not. See the design doc for issue #63.
+
+    A node-reported failure now further separates whose fault it was —
+    see the design doc for issue #58. A `router.ClientRequestError`
+    (the request itself was bad, e.g. context too long) counts as
+    exposure like any other failure but is recorded against nobody's
+    reputation and is not retried on another node; a plain
+    `router.NodeError` still records a crash exactly as before. The
+    reply's `fault` field ("client" or absent) tells the caller the
+    same thing, whether the rejection came from vLLM via the node or
+    from this coordinator's own request validation."""
     if not registry.check_token(message.get("token")):
         await websocket.close()
         return
@@ -148,8 +158,10 @@ async def _handle_complete_request(websocket, registry: NodeRegistry, message: d
     # loop starts. See the design doc for issue #63.
     started: float
 
-    async def reject(reason: str) -> None:
+    async def reject(reason: str, fault: str | None = None) -> None:
         reply = {"type": "complete_error", "reason": reason, "exposed": exposed}
+        if fault is not None:
+            reply["fault"] = fault
         if attempts:
             reply["elapsed_ms"] = int((time.monotonic() - started) * 1000)
         try:
@@ -160,7 +172,7 @@ async def _handle_complete_request(websocket, registry: NodeRegistry, message: d
 
     model = message.get("model")
     if not model:
-        await reject("model is required")
+        await reject("model is required", fault="client")
         return
 
     # The coordinator is the single place the one-message `prompt`
@@ -169,7 +181,7 @@ async def _handle_complete_request(websocket, registry: NodeRegistry, message: d
     try:
         messages = completion_request.normalize_messages(message)
     except completion_request.InvalidCompletionRequest as exc:
-        await reject(str(exc))
+        await reject(str(exc), fault="client")
         return
 
     tried: set[str] = set()
@@ -228,6 +240,16 @@ async def _handle_complete_request(websocket, registry: NodeRegistry, message: d
             exposed.append(registry.handles_for(node.public_key))
             registry.record_crash(node.public_key)
             await reject(str(exc))
+            return
+        except router.ClientRequestError as exc:
+            # The node received the conversation and vLLM read it before
+            # rejecting it, so this is exposure like any other outcome
+            # (issue #63). But the fault is the client's: no reputation
+            # damage, and no failover — a bad request fails identically
+            # on a second volunteer. See the design doc for issue #58.
+            exposed.append(registry.handles_for(node.public_key))
+            registry.record_client_fault(node.public_key)
+            await reject(str(exc), fault="client")
             return
         except router.RoutingError as exc:
             await reject(str(exc))
