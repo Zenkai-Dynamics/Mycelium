@@ -60,27 +60,33 @@ unrecognized value means a broken or hostile node, and defaulting it to
 `"node"` denies a node the option of dodging reputation by sending garbage
 instead of a valid claim. The permissive direction is the exploitable one.
 
-### 404, 408 and 429 are node faults despite being 4xx
+### 401, 403, 404, 408, 413 and 429 are node faults despite being 4xx
 
-The cross-slice design recorded "4xx except 404". Two more carve-outs:
+The cross-slice design recorded "4xx except 404". More carve-outs:
 
 | Code | Fault | Why |
 |---|---|---|
+| 401 | node | the node's own auth to vLLM is misconfigured |
+| 403 | node | the node's own auth to vLLM is misconfigured |
 | 404 | node | vLLM isn't serving the model the node registered |
 | 408 | node | the node timed out serving |
+| 413 | node | the node's own proxy/config rejected the request's size |
 | 429 | node | the node is overloaded |
 | other 4xx | client | the request itself was not acceptable |
 | 5xx, transport | node | the node broke |
 
-All three exceptions are structurally about the volunteer's capacity or
+All six exceptions are structurally about the volunteer's capacity or
 configuration rather than about the request. Classifying them as client faults
 would shield a node that genuinely cannot serve from ever reflecting that —
 the same overshoot 404 was carved out to avoid, which is the argument for
 extending it rather than a new one.
 
-vLLM does not rate-limit by default, so 429 may never appear in practice; the
-carve-out costs one tuple entry and covers a node sitting behind a proxy that
-does.
+vLLM does not rate-limit by default, so 429 may never appear in practice; nor
+does it require auth or enforce a request-size limit by default, so 401, 403
+and 413 may never appear either — in the shipped configuration vLLM is
+launched by the node itself, bound to loopback, with no api-key, so none of
+the five are reachable today. The carve-out costs one tuple entry each and
+covers a node sitting behind a proxy that does add one of these.
 
 ### A client fault still counts as exposure
 

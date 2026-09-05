@@ -187,6 +187,21 @@ def test_overloaded_statuses_are_node_faults(fake_vllm_server):
             process.complete([{"role": "user", "content": "hi"}])
 
 
+def test_auth_and_entity_too_large_statuses_are_node_faults(fake_vllm_server):
+    """401, 403 and 413 are the volunteer's own auth/proxy configuration,
+    not a defect in the request — the same reasoning that carved out
+    404/408/429. See the design doc for issue #58."""
+    for status in (401, 403, 413):
+        RESPONSE_OVERRIDE.clear()
+        RESPONSE_OVERRIDE.update({
+            "status": status, "body": json.dumps({"message": "nope"}).encode(),
+        })
+        process = VLLMProcess(model="m", port=fake_vllm_server.server_address[1])
+
+        with pytest.raises(vllm_process.VLLMServerError):
+            process.complete([{"role": "user", "content": "hi"}])
+
+
 def test_server_error_is_a_node_fault(fake_vllm_server):
     RESPONSE_OVERRIDE.update({
         "status": 500, "body": json.dumps({"message": "engine died"}).encode(),

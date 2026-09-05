@@ -53,11 +53,13 @@ class VLLMReadyTimeout(Exception):
 
 # 4xx codes that are the NODE's fault despite being client-error codes:
 # 404 means vLLM isn't serving the model this node registered (a
-# misconfiguration), and 408/429 mean the node is too busy to serve.
-# Classifying these as client faults would shield a node that genuinely
-# cannot serve from ever reflecting it in its reputation — the mirror
-# image of the bug issue #58 exists to fix. See the design doc for #58.
-NODE_FAULT_STATUSES = frozenset({404, 408, 429})
+# misconfiguration), 408/429 mean the node is too busy to serve, and
+# 401/403/413 are the volunteer's own auth/proxy configuration rather
+# than a defect in the request. Classifying these as client faults would
+# shield a node that genuinely cannot serve from ever reflecting it in
+# its reputation — the mirror image of the bug issue #58 exists to fix.
+# See the design doc for #58.
+NODE_FAULT_STATUSES = frozenset({401, 403, 404, 408, 413, 429})
 
 
 class VLLMClientError(Exception):
