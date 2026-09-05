@@ -28,9 +28,12 @@ Run it against your own nodes:
 
 from __future__ import annotations
 
+import argparse
+import asyncio
+import sys
 from pathlib import Path
 
-from mycelium.client import Flow, assistant, user
+from mycelium.client import Flow, HopError, assistant, user
 
 # The pair issue #61 plans to run on real hardware: a ~3GB instruct model
 # alongside the 7B already served there. Overridable, so the example runs
@@ -77,3 +80,92 @@ async def run(
     )
 
     return flow
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="draft_then_critique",
+        description="Draft an answer with one model, improve it with another.",
+        # Needed for --help to actually show the two model defaults below,
+        # not just name the flags — argparse otherwise prints the default
+        # only when a default AND a help string are both present.
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--coordinator-url", required=True)
+    parser.add_argument("--coordinator-cert", type=Path, required=True)
+    parser.add_argument("--token-file", type=Path, required=True)
+    parser.add_argument(
+        "--draft-model", default=DEFAULT_DRAFT_MODEL, help="model that writes the first draft"
+    )
+    parser.add_argument(
+        "--critique-model", default=DEFAULT_CRITIQUE_MODEL, help="model that improves the draft"
+    )
+    parser.add_argument("--task", default=DEFAULT_TASK)
+    return parser.parse_args(argv)
+
+
+def _print_hops(flow: Flow) -> None:
+    """Show what each hop actually sent, so the explicit-context rule is
+    visible in practice rather than only described."""
+    for hop in flow.hops:
+        print(f"\nhop {hop.index} -> {hop.model}")
+        for message in hop.sent:
+            print(f"  sent {message['role']}: {message['content']}")
+        if hop.text is not None:
+            print(f"  got: {hop.text}")
+
+
+def _print_exposure(flow: Flow, contact_lost: bool) -> None:
+    exposure = flow.exposure()
+    print("\nwho saw what:")
+    for handle, hops in exposure.by_node.items():
+        print(f"  node {handle} saw hops {hops}")
+    for handle, hops in exposure.by_identity.items():
+        who = "an unresolved identity" if handle is None else f"identity {handle}"
+        print(f"  {who} saw hops {hops}")
+    if contact_lost:
+        # The client never learned who served the failed hop, so anyone
+        # the coordinator had already routed to is missing from the count.
+        # See the design doc for issue #59 on why this is a floor.
+        print(
+            "\n  note: contact was lost mid-flow, so these figures are a "
+            "floor, not a count — the coordinator may already have sent "
+            "your content to a volunteer this client never heard about."
+        )
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    token = args.token_file.read_text().strip()
+
+    # Constructed here, not inside run(), so the record survives a failed
+    # hop: run() raises rather than returning, and without holding the
+    # Flow already this function could not report which volunteers had
+    # seen content before things went wrong. See the design doc for #60.
+    flow = Flow(args.coordinator_url, args.coordinator_cert, token)
+
+    try:
+        asyncio.run(run(
+            args.coordinator_url, args.coordinator_cert, token,
+            args.draft_model, args.critique_model, args.task, flow,
+        ))
+    except HopError as exc:
+        print(f"\nhop failed: {exc.reason}")
+        if exc.fault == "client":
+            print("  fault: client — the request was the problem, not the node")
+        elif exc.fault == "node":
+            print("  fault: node — the volunteer's machine failed, not your request")
+        else:
+            print("  fault: unknown — the request never reached a node")
+        _print_hops(flow)
+        _print_exposure(flow, contact_lost=exc.fault is None)
+        return 1
+
+    _print_hops(flow)
+    _print_exposure(flow, contact_lost=False)
+    print(f"\nresult:\n{flow.hops[-1].text}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

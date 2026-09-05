@@ -14,6 +14,7 @@ helpers (_client_ssl_context and _fake_identity_verifier are each copied
 across three test files).
 """
 
+import asyncio
 import importlib.util
 import json
 from pathlib import Path
@@ -172,3 +173,103 @@ def test_the_defaults_name_two_different_models():
 
     assert agent.DEFAULT_DRAFT_MODEL != agent.DEFAULT_CRITIQUE_MODEL
     assert agent.DEFAULT_TASK
+
+
+def test_parse_args_defaults_to_the_documented_models(tmp_path):
+    agent = _load_example()
+
+    args = agent.parse_args([
+        "--coordinator-url", "wss://x", "--coordinator-cert", "c.pem",
+        "--token-file", "t.txt",
+    ])
+
+    assert args.draft_model == agent.DEFAULT_DRAFT_MODEL
+    assert args.critique_model == agent.DEFAULT_CRITIQUE_MODEL
+    assert args.task == agent.DEFAULT_TASK
+
+
+def test_parse_args_requires_the_connection_flags():
+    agent = _load_example()
+
+    with pytest.raises(SystemExit):
+        agent.parse_args([])
+
+
+async def test_main_prints_what_each_hop_sent(tmp_path, capsys):
+    """Surfacing what each hop carried is an acceptance criterion in its
+    own right — a reader must be able to see the explicit-context rule in
+    practice, not just read about it."""
+    agent = _load_example()
+    fake = _FakeCoordinator(_queued([_result("a draft"), _result("a better draft")]))
+    running, url, cert_path = await _serve_fake(tmp_path, fake)
+    token_file = tmp_path / "token.txt"
+    token_file.write_text("secret-token")
+
+    try:
+        status = await asyncio.to_thread(agent.main, [
+            "--coordinator-url", url,
+            "--coordinator-cert", str(cert_path),
+            "--token-file", str(token_file),
+            "--draft-model", "small-model",
+            "--critique-model", "big-model",
+            "--task", "Why is the sky blue?",
+        ])
+    finally:
+        running.close()
+        await running.wait_closed()
+
+    assert status == 0
+    out = capsys.readouterr().out
+    assert "Why is the sky blue?" in out
+    assert "Improve this answer to: Why is the sky blue?" in out
+    assert "a draft" in out
+    assert "a better draft" in out
+
+
+async def test_main_reports_a_failed_hop_without_a_traceback(tmp_path, capsys):
+    agent = _load_example()
+    fake = _FakeCoordinator(_queued([{
+        "type": "complete_error",
+        "reason": "This model's maximum context length is 32768 tokens",
+        "fault": "client", "exposed": [], "elapsed_ms": 3,
+    }]))
+    running, url, cert_path = await _serve_fake(tmp_path, fake)
+    token_file = tmp_path / "token.txt"
+    token_file.write_text("secret-token")
+
+    try:
+        status = await asyncio.to_thread(agent.main, [
+            "--coordinator-url", url,
+            "--coordinator-cert", str(cert_path),
+            "--token-file", str(token_file),
+        ])
+    finally:
+        running.close()
+        await running.wait_closed()
+
+    assert status == 1
+    out = capsys.readouterr().out
+    assert "maximum context length" in out
+    assert "client" in out
+
+
+async def test_main_says_exposure_is_a_floor_when_contact_was_lost(tmp_path, capsys):
+    """fault is None means the client never learned who saw its content —
+    so the exposure figures understate it, and saying otherwise would
+    overclaim. See the design doc for issue #59."""
+    agent = _load_example()
+    token_file = tmp_path / "token.txt"
+    token_file.write_text("secret-token")
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    # Nothing is listening on this port, so the hop fails in transport.
+    status = await asyncio.to_thread(agent.main, [
+        "--coordinator-url", "wss://127.0.0.1:1",
+        "--coordinator-cert", str(cert_path),
+        "--token-file", str(token_file),
+    ])
+
+    assert status == 1
+    assert "floor" in capsys.readouterr().out
