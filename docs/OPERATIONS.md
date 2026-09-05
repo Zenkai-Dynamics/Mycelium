@@ -410,10 +410,18 @@ try:
 except HopError as exc:
     if exc.fault == "client":
         ...  # your request was the problem — trim it and try again
-    else:
+    elif exc.fault == "node":
         ...  # the node's problem — another model or another attempt
-    print(exc.hop.exposed)  # that volunteer read it regardless
+    else:
+        # fault is None: no node ever judged this request — the
+        # coordinator was unreachable, or never answered.
+        ...
+    print(exc.hop.exposed)  # any volunteer that read it regardless
 ```
+
+`exc.fault` is `None` when no node ever judged the request — a transport
+failure, where blaming a volunteer would be wrong. Branch on `"client"` and
+`"node"` explicitly rather than treating "not client" as the node's fault.
 
 Keeping a conversation within a model's context window is your job. The node
 never silently truncates.
