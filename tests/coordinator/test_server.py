@@ -196,7 +196,7 @@ async def test_registered_node_appears_in_status_query(tmp_path):
                         "model": "Qwen/Qwen2.5-7B-Instruct",
                         "fingerprint": crypto.fingerprint(public_key),
                         "identity": "octocat",
-                        "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0},
+                        "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0, "client_faults": 0},
                     }],
                 }
 
@@ -264,7 +264,7 @@ async def test_duplicate_public_key_replaces_and_closes_old_connection(tmp_path)
                         "model": "model-b",
                         "fingerprint": crypto.fingerprint(public_key),
                         "identity": "octocat",
-                        "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0},
+                        "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0, "client_faults": 0},
                     }
                 ]
 
@@ -315,7 +315,7 @@ async def test_reregistration_with_non_canonical_public_key_spelling_is_treated_
                             "model": "model-b",
                             "fingerprint": crypto.fingerprint(canonical_public_key),
                             "identity": "octocat",
-                            "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0},
+                            "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0, "client_faults": 0},
                         }
                     ]
 
@@ -703,7 +703,7 @@ async def test_silently_unresponsive_node_is_dropped_within_ping_timeout_window(
                     "model": "m",
                     "fingerprint": crypto.fingerprint(public_key),
                     "identity": "octocat",
-                    "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0},
+                    "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0, "client_faults": 0},
                 }],
             }
 
@@ -1055,6 +1055,7 @@ async def test_complete_request_success_increments_completion_counter(tmp_path):
                 response = json.loads(await status_ws.recv())
                 assert response["nodes"][0]["reputation"] == {
                     "completions": 1, "timeouts": 0, "crashes": 0, "disconnects": 0,
+                    "client_faults": 0,
                 }
 
 
@@ -1209,7 +1210,7 @@ async def test_complete_request_client_disconnect_before_reply_does_not_crash_se
                     "model": "m",
                     "fingerprint": crypto.fingerprint(public_key),
                     "identity": "octocat",
-                    "reputation": {"completions": 1, "timeouts": 0, "crashes": 0, "disconnects": 0},
+                    "reputation": {"completions": 1, "timeouts": 0, "crashes": 0, "disconnects": 0, "client_faults": 0},
                 }
             ]
 
@@ -1486,7 +1487,7 @@ async def test_complete_request_fails_over_to_healthy_node_when_first_pick_is_de
             "model": "m",
             "fingerprint": hashlib.sha256(b"b" * 32).hexdigest()[:12],
             "identity": None,
-            "reputation": {"completions": 1, "timeouts": 0, "crashes": 0, "disconnects": 0},
+            "reputation": {"completions": 1, "timeouts": 0, "crashes": 0, "disconnects": 0, "client_faults": 0},
         }
     ]
 
@@ -1513,13 +1514,13 @@ async def test_complete_request_does_not_fail_over_on_timeout(monkeypatch):
             "node_id": "node-a", "model": "m",
             "fingerprint": hashlib.sha256(b"a" * 32).hexdigest()[:12],
             "identity": None,
-            "reputation": {"completions": 0, "timeouts": 1, "crashes": 0, "disconnects": 0},
+            "reputation": {"completions": 0, "timeouts": 1, "crashes": 0, "disconnects": 0, "client_faults": 0},
         },
         {
             "node_id": "node-b", "model": "m",
             "fingerprint": hashlib.sha256(b"b" * 32).hexdigest()[:12],
             "identity": None,
-            "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0},
+            "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0, "client_faults": 0},
         },
     ]
 

@@ -75,7 +75,8 @@ def main() -> None:
         rep = node["reputation"]
         reputation = (
             f" [ok:{rep['completions']} timeout:{rep['timeouts']} "
-            f"crash:{rep['crashes']} disconnect:{rep['disconnects']}]"
+            f"crash:{rep['crashes']} disconnect:{rep['disconnects']} "
+            f"client_faults:{rep['client_faults']}]"
         )
         print(f"{node['node_id']} [{node['fingerprint']}]{identity}{reputation}: {node['model']}")
 
