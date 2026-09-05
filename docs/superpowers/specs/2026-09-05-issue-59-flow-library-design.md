@@ -50,6 +50,15 @@ agent trimming its context would do. Documenting "don't mutate" was rejected
 on the same grounds ADR-0004 rejected opt-in privacy — a property that depends
 on every author reading and obeying a docstring is not a property.
 
+**The copy is what goes on the wire, not just what is recorded.** `call` is a
+coroutine whose first suspension point is inside `transport.request`, and the
+request is serialised only once the connection is up. Putting the caller's
+live list in the request would leave a window in which another coroutine could
+mutate it after the copy was taken and before the frame was written — the
+volunteer receiving more than the record says was sent, which is precisely the
+direction ADR-0004 cannot tolerate. Sending `sent` makes record and wire
+identical by construction rather than by timing.
+
 ### `HopError` carries the fault and the hop
 
 ```python
@@ -173,8 +182,12 @@ The load-bearing test is the explicit-context one, and it must check the
 coordinator received and assert the exact JSON of each hop. A test that
 inspected `Hop.sent` would pass even if `call` sent something else.
 
-Then: mutating the caller's list after a call leaves `hop.sent` unchanged; a
-failed hop is in the record *before* `HopError` surfaces, carrying its fault;
+Then: mutating the caller's list after a call leaves `hop.sent` unchanged;
+mutating it *while a call is in flight* — started as a task and yielded to
+once, so it is suspended inside `connect` — changes neither `hop.sent` nor the
+frame the coordinator received, which the after-the-fact test cannot catch and
+which must be asserted against the wire; a failed hop is in the record
+*before* `HopError` surfaces, carrying its fault;
 `exposure()` groups by node and by identity including the `None` key; a
 `gather` of three calls records them in call order; and the entire existing
 client CLI suite stays green through the transport migration, which is the

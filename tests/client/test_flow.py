@@ -116,6 +116,52 @@ async def test_the_record_survives_the_caller_mutating_its_list(tmp_path):
     assert flow.hops[0].sent == [{"role": "user", "content": "original"}]
 
 
+async def test_the_wire_matches_the_record_when_the_list_is_mutated_in_flight(tmp_path):
+    """The regression test for the window between `call` taking its deep
+    copy and the request being serialised.
+
+    `call` is async, and its first suspension point is inside
+    `transport.request` — `websockets.connect.__aenter__` — which happens
+    *before* `json.dumps` turns the request into a frame. If the caller's
+    live list were the one placed in the request, any coroutine mutating
+    it during that window would change what the volunteer receives while
+    the record still showed the pre-mutation copy: the volunteer would
+    have seen more than the evidence says, which is the one direction
+    ADR-0004 cannot tolerate.
+
+    Mutating *after* the call returns cannot catch this — that is the
+    older test above, and it passes either way. This one starts the call
+    as a task, yields once so it reaches its first await, and mutates
+    while it is in flight. It asserts on the frame the coordinator
+    actually received, because asserting only on `hop.sent` would pass
+    against exactly the bug it exists to catch.
+    """
+    fake = _FakeCoordinator(_queued([_result("ok")]))
+    running, url, cert_path = await _serve_fake(tmp_path, fake)
+
+    messages = [user("original")]
+    try:
+        flow = Flow(url, cert_path, "secret-token")
+        call = asyncio.create_task(flow.call("m", messages=messages))
+        # One yield is enough and is not a race: create_task queues the
+        # call's first step ahead of this coroutine's resumption, so the
+        # call is already suspended inside connect() when the mutation
+        # below runs, and the request cannot be serialised until connect
+        # finishes several loop iterations later.
+        await asyncio.sleep(0)
+        messages[0]["content"] = "tampered"
+        messages.append(user("added later"))
+        hop = await call
+    finally:
+        running.close()
+        await running.wait_closed()
+
+    assert fake.received[0]["messages"] == [{"role": "user", "content": "original"}], (
+        "the volunteer must receive exactly what the record says was sent"
+    )
+    assert hop.sent == fake.received[0]["messages"]
+
+
 async def test_a_successful_hop_records_everything(tmp_path):
     fake = _FakeCoordinator(_queued([_result("the answer")]))
     running, url, cert_path = await _serve_fake(tmp_path, fake)

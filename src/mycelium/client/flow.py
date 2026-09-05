@@ -152,11 +152,23 @@ class Flow:
         Only `messages` is sent. Nothing from earlier hops is added — see
         ADR-0004.
 
-        The messages are deep-copied into the record, so an agent that
-        reuses and trims its list across hops cannot retroactively rewrite
-        what this hop is recorded as having sent. The record is the
-        evidence behind the exposure report; a reference the caller can
-        mutate would not be.
+        The messages are deep-copied once, and that copy is both what goes
+        on the wire and what the record keeps, so an agent that reuses and
+        trims its list across hops can neither retroactively rewrite what
+        this hop is recorded as having sent nor change what the volunteer
+        receives. The record is the evidence behind the exposure report; a
+        reference the caller can mutate would not be.
+
+        Sending the copy rather than the caller's list is load-bearing,
+        not tidiness. This coroutine's first suspension point is inside
+        `transport.request`, and the request is serialised only after the
+        connection is up; a coroutine mutating the caller's list in that
+        window would otherwise change what the volunteer receives while
+        the record still showed the original — the volunteer seeing *more*
+        than the evidence claims, which is the one failure direction
+        ADR-0004 exists to rule out. Nobody else holds a reference to
+        `sent`, so record and wire agree by construction rather than by
+        timing. See the design doc for issue #59.
 
         Raises HopError if the hop fails, after recording it. Structural
         validation of `messages` is the coordinator's job (issue #55), not
@@ -166,7 +178,7 @@ class Flow:
         self._next_index += 1
         sent = copy.deepcopy(messages)
         request = {
-            "type": "complete", "token": self._token, "model": model, "messages": messages,
+            "type": "complete", "token": self._token, "model": model, "messages": sent,
         }
 
         started = time.monotonic()
