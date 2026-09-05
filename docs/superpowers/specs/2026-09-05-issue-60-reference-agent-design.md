@@ -38,8 +38,7 @@ So it gets a test, and the file is shaped to allow one.
 ### `run()` returns the Flow; `main()` is thin
 
 ```python
-async def run(coordinator_url, coordinator_cert, token,
-              draft_model, critique_model, task) -> Flow
+async def run(flow, draft_model, critique_model, task) -> Flow
 def main(argv=None) -> int
 ```
 
@@ -53,13 +52,21 @@ that were checking behavior.
 `main()` still gets its own test, because surfacing what each hop sent is an
 acceptance criterion in its own right, not an implementation detail.
 
-`run` also takes an optional `flow`, and `main` constructs it. That looks like
-a testing affordance and isn't: `run` **raises** on a failed hop rather than
+`run` takes the `Flow`, and the caller always constructs it. That looks like a
+testing affordance and isn't: `run` **raises** on a failed hop rather than
 returning, so a caller that did not already hold the `Flow` would lose the
 record of everything that happened before the failure — including which
 volunteers had already seen content. Keeping the record in the caller's hands
 is precisely what #59 built it for, and a reference agent that lost it on the
 one path where it matters most would be teaching the wrong lesson.
+
+An earlier draft of this design had `run` take `coordinator_url`,
+`coordinator_cert` and `token` *as well*, building a `Flow` only if the
+optional one was absent. Review rejected that: on the path `main()` actually
+takes, all three arguments are dead, and a caller passing a `Flow` built
+against one coordinator plus a URL naming another would get no error rather
+than a complaint. Two ways to say the same thing, one silently ignored, is not
+what the file that teaches the API should demonstrate.
 
 ### The critique hop is given the task, deliberately
 
@@ -99,10 +106,16 @@ request does not exist until #56, and #59 deliberately omitted
 
 ### A failed hop branches on `fault`
 
-`HopError` is caught. `client` means the request was the problem, `node` the
-volunteer's, `None` that it never reached one. The example prints the reason,
-the fault and its meaning, the exposure accumulated so far, then exits
-non-zero.
+`HopError` is caught. `client` means the request was the problem and `node`
+the volunteer's. An absent `fault` means only that **nothing came back saying
+whose failure it was** — it is emphatically not a synonym for "no node was
+reached". The coordinator's `reject()` sets `fault` for client faults and
+omits it for everything else, so today node crashes, node timeouts and
+no-healthy-node all arrive with no fault, and the `"node"` branch is
+unreachable end to end. Issue #71 tracks fixing that in the coordinator; the
+branch stays here because #71 will make it reachable and `docs/OPERATIONS.md`
+documents it. The example prints the reason, the fault and its meaning, the
+exposure accumulated so far, then exits non-zero.
 
 Demonstrating recovery — trimming context and retrying on a client fault — was
 rejected: it adds a trimming heuristic to a file whose job is to show two
@@ -110,11 +123,25 @@ models composing, and heuristics in an example get copied. Ignoring `fault`
 entirely was also rejected: it is information the library goes out of its way
 to deliver, and the thing an agent author most needs.
 
-**When `fault is None`, one line records that the exposure figures are a floor
-rather than a count** — the client lost contact and never learned who saw its
-content. #59 established that distinction; an example printing exposure after
-a timeout without it would quietly overclaim, which this project's standards
-forbid.
+**When `hop.elapsed_ms is None`, one line records that the exposure figures
+are a floor rather than a count** — no reply arrived, so the client never
+learned who, if anyone, saw that hop. #59 established that distinction; an
+example printing exposure after a timeout without it would quietly overclaim,
+which this project's standards forbid.
+
+The trigger is deliberately *not* `fault is None`, which this design
+originally specified and review found to be wrong on nearly every path.
+`fault` answers "whose mistake was it", not "did a reply arrive", and because
+`reject()` omits it for node-side failures the two questions disagree exactly
+where it matters. Keyed on `fault`, the example stamped the floor caveat on a
+node crash — three lines after naming the volunteer the same reply said had
+seen the content — and on a refused connection, where nothing was sent and the
+figures are exactly right. `elapsed_ms` is the coordinator's own measure of
+routing time and rides on every reply, so it is `None` precisely when the
+round trip produced no reply, which is the one condition the caveat is true
+under. The wording asserts neither that content was seen nor that it wasn't:
+after a refused connection nothing was sent, after a timeout everything may
+have been, and the client has no channel to learn which.
 
 ### The test uses a frame-recording fake coordinator
 

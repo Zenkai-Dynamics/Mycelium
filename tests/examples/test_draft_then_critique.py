@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 import websockets
 
+from mycelium.client import Flow
 from mycelium.coordinator import certs, server
 
 MODULE_PATH = Path(__file__).parents[2] / "examples" / "draft_then_critique.py"
@@ -48,6 +49,26 @@ class _FakeCoordinator:
         message = json.loads(await websocket.recv())
         self.received.append(message)
         await websocket.send(json.dumps(await self._reply_for(message)))
+        await websocket.close()
+
+
+class _SilentCoordinator:
+    """Accepts the connection, reads the frame, then closes without ever
+    replying.
+
+    This is the case the floor caveat is actually about: the content is
+    on the wire and gone, and no reply came back to say who — if anyone —
+    read it. A refused connection is not that case. Nothing is sent at
+    all, so the exposure figures are exactly right, which is what Hop's
+    own docstring says and why keying a test on a refused port tested the
+    one situation where the caveat is false.
+    """
+
+    def __init__(self):
+        self.received: list[dict] = []
+
+    async def handler(self, websocket):
+        self.received.append(json.loads(await websocket.recv()))
         await websocket.close()
 
 
@@ -85,7 +106,7 @@ async def test_the_flow_calls_both_models_in_order(tmp_path):
 
     try:
         flow = await agent.run(
-            url, cert_path, "secret-token",
+            Flow(url, cert_path, "secret-token"),
             draft_model="small-model", critique_model="big-model",
             task="Why is the sky blue?",
         )
@@ -107,7 +128,7 @@ async def test_the_critique_hop_carries_exactly_what_it_named(tmp_path):
 
     try:
         await agent.run(
-            url, cert_path, "secret-token",
+            Flow(url, cert_path, "secret-token"),
             draft_model="small-model", critique_model="big-model",
             task="Why is the sky blue?",
         )
@@ -131,7 +152,7 @@ async def test_the_models_are_the_ones_asked_for(tmp_path):
 
     try:
         await agent.run(
-            url, cert_path, "secret-token",
+            Flow(url, cert_path, "secret-token"),
             draft_model="tiny", critique_model="huge",
             task="anything",
         )
@@ -157,7 +178,7 @@ async def test_a_failed_hop_propagates_as_a_hop_error(tmp_path):
     try:
         with pytest.raises(HopError) as exc:
             await agent.run(
-                url, cert_path, "secret-token",
+                Flow(url, cert_path, "secret-token"),
                 draft_model="small-model", critique_model="big-model",
                 task="anything",
             )
@@ -224,6 +245,13 @@ async def test_main_prints_what_each_hop_sent(tmp_path, capsys):
     assert "Improve this answer to: Why is the sky blue?" in out
     assert "a draft" in out
     assert "a better draft" in out
+    # Finding 7: the exposure section is an acceptance criterion, so a
+    # regression that dropped it entirely must fail here.
+    assert "who saw what:" in out
+    assert "node a3f9c2e1b4d6f8a0 saw hops [0, 1]" in out
+    # Finding 3: every hop got a full reply naming who saw it, so the
+    # figures are a count. Nothing may suggest otherwise.
+    assert "floor" not in out
 
 
 async def test_main_reports_a_failed_hop_without_a_traceback(tmp_path, capsys):
@@ -250,26 +278,84 @@ async def test_main_reports_a_failed_hop_without_a_traceback(tmp_path, capsys):
     assert status == 1
     out = capsys.readouterr().out
     assert "maximum context length" in out
-    assert "client" in out
+    assert "  fault: client \u2014 the request was the problem, not the node" in out
+    # A complete_error is a reply: the coordinator answered and said what
+    # it saw, so the figures are a count rather than a floor.
+    assert "floor" not in out
 
 
-async def test_main_says_exposure_is_a_floor_when_contact_was_lost(tmp_path, capsys):
-    """fault is None means the client never learned who saw its content —
-    so the exposure figures understate it, and saying otherwise would
-    overclaim. See the design doc for issue #59."""
+async def test_main_says_exposure_is_a_floor_when_no_reply_arrived(tmp_path, capsys):
+    """No reply arrived, so this client never learned who — if anyone —
+    saw the hop, and the exposure figures understate it.
+
+    The coordinator here accepts the connection and reads the frame
+    before closing, which is the only shape that makes the caveat true.
+    An earlier version of this test pointed at a dead port: connection
+    refused, nothing sent, figures exactly right — the one case where
+    printing "floor" would itself be the overclaim. See Hop's docstring
+    and the design doc for issue #59.
+    """
     agent = _load_example()
+    fake = _SilentCoordinator()
+    running, url, cert_path = await _serve_fake(tmp_path, fake)
     token_file = tmp_path / "token.txt"
     token_file.write_text("secret-token")
-    cert_path = tmp_path / "cert.pem"
-    key_path = tmp_path / "key.pem"
-    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
-    # Nothing is listening on this port, so the hop fails in transport.
-    status = await asyncio.to_thread(agent.main, [
-        "--coordinator-url", "wss://127.0.0.1:1",
-        "--coordinator-cert", str(cert_path),
-        "--token-file", str(token_file),
-    ])
+    try:
+        status = await asyncio.to_thread(agent.main, [
+            "--coordinator-url", url,
+            "--coordinator-cert", str(cert_path),
+            "--token-file", str(token_file),
+        ])
+    finally:
+        running.close()
+        await running.wait_closed()
 
     assert status == 1
-    assert "floor" in capsys.readouterr().out
+    # The content really did leave this client before contact was lost —
+    # which is what makes the figures a floor rather than a count.
+    assert fake.received
+    out = capsys.readouterr().out
+    assert "floor" in out
+    assert "never reached a node" not in out
+
+
+async def test_main_does_not_call_a_full_reply_a_floor(tmp_path, capsys):
+    """A node-side failure comes back as a complete_error carrying no
+    `fault` field but a populated `exposed` — the coordinator's reject()
+    only ever sets `fault` for client faults (issue #71), while every
+    reply names who saw the content.
+
+    That reply arrived. The client knows exactly who saw the hop, so the
+    figures are a count. Keying the caveat off `fault is None` made the
+    example print "these figures are a floor" three lines after naming
+    the node that saw the content, and "the request never reached a node"
+    about a request a node had demonstrably read.
+    """
+    agent = _load_example()
+    fake = _FakeCoordinator(_queued([{
+        "type": "complete_error", "reason": "node crashed mid-generation",
+        "exposed": [{
+            "node_handle": "a3f9c2e1b4d6f8a0", "identity_handle": "7b1d4408c2e6f1a3",
+        }],
+        "elapsed_ms": 118,
+    }]))
+    running, url, cert_path = await _serve_fake(tmp_path, fake)
+    token_file = tmp_path / "token.txt"
+    token_file.write_text("secret-token")
+
+    try:
+        status = await asyncio.to_thread(agent.main, [
+            "--coordinator-url", url,
+            "--coordinator-cert", str(cert_path),
+            "--token-file", str(token_file),
+        ])
+    finally:
+        running.close()
+        await running.wait_closed()
+
+    assert status == 1
+    out = capsys.readouterr().out
+    assert "node a3f9c2e1b4d6f8a0 saw hops [0]" in out
+    assert "floor" not in out
+    assert "never reached a node" not in out
