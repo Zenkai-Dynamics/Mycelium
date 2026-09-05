@@ -15,14 +15,16 @@ import json
 import sys
 from pathlib import Path
 
-import websockets
+from mycelium.client import transport
 
-from mycelium.node.connection import build_ssl_context
-
-# 10s past coordinator/router.py's own NODE_COMPLETE_TIMEOUT_SECONDS
-# (130s), so the coordinator's timeout fires first and this client gets
-# that specific complete_error reason, rather than giving up first with a
-# vaguer "coordinator did not respond" message of its own.
+# 10s past coordinator/router.py's per-attempt
+# NODE_COMPLETE_TIMEOUT_SECONDS (130s), so on a single attempt the
+# coordinator's timeout fires first and this client gets that specific
+# complete_error reason, rather than giving up first with a vaguer
+# "coordinator did not respond" message of its own. Across a failover it
+# does not hold — the coordinator's retry loop has no overall budget, so
+# each new node gets a fresh 130s. Kept equal to flow.CALL_TIMEOUT_SECONDS
+# and pinned by a test (issue #59).
 CLIENT_COMPLETE_TIMEOUT_SECONDS = 140.0
 
 
@@ -80,25 +82,24 @@ async def complete(
     else:
         request["messages"] = messages
 
-    ssl_context = build_ssl_context(coordinator_cert)
-    async with websockets.connect(coordinator_url, ssl=ssl_context) as websocket:
-        await websocket.send(json.dumps(request))
-        try:
-            async with asyncio.timeout(timeout):
-                raw = await websocket.recv()
-        except TimeoutError:
-            raise CompletionError(f"coordinator did not respond within {timeout}s") from None
-        except websockets.exceptions.ConnectionClosed:
+    try:
+        message = await transport.request(coordinator_url, coordinator_cert, request, timeout)
+    except transport.TransportError as exc:
+        # transport doesn't know this caller has a --token-file flag, so
+        # its "(check the token)" wording is kept generic (issue #59). The
+        # CLI knows more about its own likely cause and re-raises with the
+        # original, more specific text rather than transport's.
+        if "closed the connection without responding" in str(exc):
             raise CompletionError(
                 "coordinator closed the connection without responding (check --token-file)"
             ) from None
+        raise CompletionError(str(exc)) from None
 
-        message = json.loads(raw)
-        if message.get("type") == "complete_result":
-            return message["text"]
-        if message.get("type") == "complete_error":
-            raise CompletionError(message.get("reason", "unknown reason"))
-        raise CompletionError(f"unexpected response from coordinator: {message!r}")
+    if message.get("type") == "complete_result":
+        return message["text"]
+    if message.get("type") == "complete_error":
+        raise CompletionError(message.get("reason", "unknown reason"))
+    raise CompletionError(f"unexpected response from coordinator: {message!r}")
 
 
 def main() -> None:

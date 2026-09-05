@@ -13,8 +13,9 @@ from threading import Thread
 import websockets
 
 from mycelium import crypto
+from mycelium.client import cli, flow
 from mycelium.client.cli import complete as client_complete
-from mycelium.coordinator import certs, server
+from mycelium.coordinator import certs, router, server
 from mycelium.coordinator import github_identity
 from mycelium.node import connection, registration, request_handler
 from mycelium.node.vllm_process import VLLMProcess
@@ -90,6 +91,15 @@ def test_server_and_connection_agree_on_keepalive_settings():
 
 def test_server_and_registration_agree_on_timeout_settings():
     assert server.FIRST_MESSAGE_TIMEOUT_SECONDS == registration.REGISTRATION_TIMEOUT_SECONDS
+
+
+def test_both_client_entry_points_agree_on_the_completion_timeout():
+    """Both constants carry a comment asserting this relationship and
+    nothing pinned it (issue #59). The two clients giving up at different
+    moments would make the same failure report differently depending on
+    which one made the call."""
+    assert flow.CALL_TIMEOUT_SECONDS == cli.CLIENT_COMPLETE_TIMEOUT_SECONDS
+    assert flow.CALL_TIMEOUT_SECONDS == router.NODE_COMPLETE_TIMEOUT_SECONDS + 10.0
 
 
 class _FakeVLLMHandler(BaseHTTPRequestHandler):
