@@ -90,12 +90,18 @@ about completions, faults or exposure. Transport-level failures raise
 `TransportError`; a `complete_error` in the reply is data the caller
 interprets.
 
-Three things count as transport-level: a timeout, the coordinator closing
-without replying, and the coordinator being unreachable. The third is worth
-naming because it arrives differently — a refused or unroutable connection
-raises `OSError` out of `websockets`, not `ConnectionClosed` — and if it
-escaped unwrapped, `Flow` could not record the attempted hop, leaving a gap
-in a record whose completeness is the point.
+Transport-level means anything short of a parsed reply: a timeout, the
+coordinator closing without replying, the coordinator being unreachable, a
+websocket exchange that fails for any other reason, and a reply that is not
+JSON. The last three are worth naming because they arrive from three
+unrelated hierarchies — a refused or unroutable connection raises `OSError`
+out of `websockets`; a close during the send or an endpoint answering the
+upgrade with plain HTTP raises a `WebSocketException`, which is *not* an
+`OSError`; and parsing raises `json.JSONDecodeError`, so the parse has to sit
+inside the guarded block rather than after it. Anything that escaped unwrapped
+would mean `Flow` could not record the attempted hop, leaving a gap in a
+record whose completeness is the point, and would reach `mycelium-client` as a
+traceback, since it catches only `CompletionError`.
 
 The alternative, having transport raise on `complete_error`, would couple it
 to one caller's error type, which the other would then catch and re-raise —

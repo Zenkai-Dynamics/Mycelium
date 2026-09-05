@@ -131,6 +131,69 @@ async def test_request_raises_on_timeout(tmp_path):
             await node_task
 
 
+async def test_request_raises_when_the_handshake_is_rejected(tmp_path):
+    """A TLS endpoint that is not a websocket server — the wrong port, or
+    a proxy in front of the coordinator — answers the upgrade with plain
+    HTTP. websockets raises InvalidStatus, which derives from
+    WebSocketException and *not* from OSError, so before issue #59's fix
+    it escaped transport entirely: Flow could not record the attempted
+    hop and mycelium-client printed a traceback."""
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async def handle(reader, writer):
+        await reader.readline()
+        writer.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+        await writer.drain()
+        writer.close()
+
+    not_a_websocket_server = await asyncio.start_server(
+        handle, "127.0.0.1", 0, ssl=server.build_ssl_context(cert_path, key_path)
+    )
+    port = not_a_websocket_server.sockets[0].getsockname()[1]
+
+    try:
+        with pytest.raises(transport.TransportError):
+            await transport.request(
+                f"wss://127.0.0.1:{port}", cert_path,
+                {"type": "status_query", "token": "secret-token"}, timeout=5.0,
+            )
+    finally:
+        not_a_websocket_server.close()
+        await not_a_websocket_server.wait_closed()
+
+
+async def test_request_raises_when_the_reply_is_not_json(tmp_path):
+    """Parsing is part of the round trip transport promises to complete,
+    so a reply that is not JSON must arrive as a TransportError like any
+    other failure to produce a reply — not as a JSONDecodeError from a
+    line the caller never sees."""
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async def handler(websocket):
+        await websocket.recv()
+        await websocket.send("this is not json")
+        await websocket.close()
+
+    running = await websockets.serve(
+        handler, "127.0.0.1", 0, ssl=server.build_ssl_context(cert_path, key_path)
+    )
+    port = running.sockets[0].getsockname()[1]
+
+    try:
+        with pytest.raises(transport.TransportError):
+            await transport.request(
+                f"wss://127.0.0.1:{port}", cert_path,
+                {"type": "status_query", "token": "secret-token"}, timeout=5.0,
+            )
+    finally:
+        running.close()
+        await running.wait_closed()
+
+
 async def test_request_raises_when_the_coordinator_cannot_be_reached(tmp_path):
     """A refused connection raises OSError out of websockets, not
     ConnectionClosed. Without wrapping it, a bare OSError would escape

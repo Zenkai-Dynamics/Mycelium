@@ -30,11 +30,26 @@ class TransportError(Exception):
     reply arrived within the timeout, or the connection closed without a
     response (most often a rejected token).
 
-    Every way the round trip can fail short of producing a reply arrives
-    as this one class, so a caller has exactly one thing to catch. In
-    particular a refused or unreachable connection raises OSError from
-    `websockets.connect`, which would otherwise escape as a bare OSError
-    and leave Flow unable to record the attempted hop.
+    Every way the round trip can fail short of producing a parsed reply
+    arrives as this one class, so a caller has exactly one thing to catch.
+    That claim is only worth making if it holds for failures from three
+    unrelated hierarchies, which is why `request` catches all three:
+
+    - `OSError` — a refused or unreachable host, a DNS failure, a
+      rejected TLS handshake, all raised out of `websockets.connect`.
+    - `websockets.exceptions.WebSocketException` — a protocol-level
+      failure such as a close during the send, or an endpoint that
+      answers the upgrade with plain HTTP. These derive from
+      `WebSocketException`, *not* from `OSError`, so catching only
+      `OSError` let them escape.
+    - `json.JSONDecodeError` — a reply arrived but is not JSON. Parsing
+      is part of the round trip this module promises, so a failure to
+      parse is a failure of the round trip.
+
+    Anything that escaped instead would leave Flow unable to record the
+    attempted hop — the gap this wrapping exists to close — and would
+    reach mycelium-client as a traceback, since it catches only
+    CompletionError. See the design doc for issue #59.
     """
 
 
@@ -44,9 +59,10 @@ async def request(
     """Send `message` to the coordinator and return its reply, parsed.
 
     Raises TransportError if the coordinator cannot be reached, no reply
-    arrives within `timeout`, or the connection closes first. Any reply
-    that does arrive is returned as-is, including a complete_error —
-    deciding what a reply means belongs to the caller.
+    arrives within `timeout`, the connection closes or fails first, or
+    what comes back is not JSON. Any reply that does parse is returned
+    as-is, including a complete_error — deciding what a reply means
+    belongs to the caller.
     """
     ssl_context = build_ssl_context(coordinator_cert)
     try:
@@ -63,11 +79,25 @@ async def request(
                 raise TransportError(
                     "coordinator closed the connection without responding (check the token)"
                 ) from None
+        # Parsed inside the try: a reply that is not JSON is a failure of
+        # this round trip, and leaving it outside let a JSONDecodeError
+        # escape the one class this module promises (issue #59).
+        return json.loads(raw)
+    # TransportError is none of the three types below — it derives from
+    # Exception directly — so the raises inside the block above pass
+    # through every handler untouched and keep their specific wording.
     except OSError as exc:
         # Connection establishment failed — refused, unreachable host, DNS
         # failure, TLS handshake rejected. `websockets.connect` is lazy, so
         # these surface when the context manager is entered rather than
-        # from the call itself. TransportError is not an OSError, so the
-        # two raises above pass through this handler untouched.
+        # from the call itself.
         raise TransportError(f"could not reach the coordinator: {exc}") from None
-    return json.loads(raw)
+    except websockets.exceptions.WebSocketException as exc:
+        # Reached but the websocket exchange itself failed: a close during
+        # the send, or an endpoint that answered the upgrade with plain
+        # HTTP (the wrong port, or a proxy). These derive from
+        # WebSocketException rather than OSError, so the handler above
+        # never saw them.
+        raise TransportError(f"the connection to the coordinator failed: {exc}") from None
+    except json.JSONDecodeError as exc:
+        raise TransportError(f"the coordinator's reply was not JSON: {exc}") from None
