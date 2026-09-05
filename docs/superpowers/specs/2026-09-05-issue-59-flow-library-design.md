@@ -129,7 +129,7 @@ class Hop:
     error: str | None
     fault: str | None
     exposed: list[dict]       # [{node_handle, identity_handle}, ...]
-    elapsed_ms: int | None    # absent when no node was attempted
+    elapsed_ms: int | None    # absent when no reply arrived to carry it
     wall_ms: int
 
 
@@ -141,7 +141,19 @@ class Exposure:
 
 A failed hop is as complete a record as a successful one — #59's acceptance
 criteria require the record to stay intact and usable after a failure, which
-a separate failure list would not satisfy. Client↔coordinator overhead is
+a separate failure list would not satisfy.
+
+**A transport failure records `exposed=[]`, which is a floor rather than a
+count.** For an unreachable coordinator the content never left the client, so
+nothing was seen. For a timeout it may have: the coordinator's retry loop has
+no overall wall-clock budget, so a failover gives the next node a fresh
+`NODE_COMPLETE_TIMEOUT_SECONDS` while the client's 140s expires mid-loop, and
+volunteers who read the content are never named in a reply that does not
+arrive. Raising the client's timeout would not fix this — no finite value
+bounds an unbudgeted retry loop — and the client has no channel to ask after
+the fact. The honest fix is therefore documentation, not machinery: `Hop`,
+`exposure()` and `docs/OPERATIONS.md` all say plainly that an empty `exposed`
+on a transport failure means "the client never learned who saw it". Client↔coordinator overhead is
 derivable per hop as `wall_ms − elapsed_ms`, which is what #61 measures.
 
 `exposure()` returns both groupings rather than a flat list of pairs: the

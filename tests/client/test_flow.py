@@ -216,9 +216,17 @@ async def test_a_failed_hop_is_recorded_then_raises_with_its_fault(tmp_path):
     assert exc.value.hop is recorded
 
 
-async def test_a_transport_failure_is_recorded_as_a_hop(tmp_path):
-    """Nothing reached a node, so no exposure and no elapsed_ms — but the
-    attempt is still part of the flow's history."""
+async def test_a_refused_connection_is_recorded_as_a_hop(tmp_path):
+    """A refused connection: nothing reached a node, so no exposure and no
+    elapsed_ms — but the attempt is still part of the flow's history.
+
+    The empty `exposed` is honest here because the content demonstrably
+    never left this machine. It does not generalise to every transport
+    failure: a timeout records the same empty list while the coordinator
+    may already have handed the content to volunteers, so there it is a
+    floor rather than a count. That gap is documented on Hop rather than
+    tested, because the client has no way to observe what it never heard.
+    """
     cert_path = tmp_path / "cert.pem"
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")

@@ -23,9 +23,17 @@ from pathlib import Path
 
 from mycelium.client import transport
 
-# Matches mycelium.client.cli's own default: 10s past the coordinator's
-# NODE_COMPLETE_TIMEOUT_SECONDS, so the coordinator's timeout fires first
-# and the caller gets its specific reason rather than a vaguer local one.
+# Matches mycelium.client.cli's CLIENT_COMPLETE_TIMEOUT_SECONDS, pinned by
+# a test: 10s past the coordinator's per-attempt
+# NODE_COMPLETE_TIMEOUT_SECONDS, so for a *single* attempt the
+# coordinator's timeout fires first and the caller gets its specific
+# reason rather than a vaguer local one.
+#
+# It does not hold across failover. The coordinator's retry loop has no
+# overall wall-clock budget, so each new node gets a fresh 130s and this
+# client can give up mid-loop — which is why a transport timeout is
+# documented as recording a floor on exposure rather than a count (see
+# Hop below and the design doc for issue #59).
 CALL_TIMEOUT_SECONDS = 140.0
 
 
@@ -56,9 +64,22 @@ class Hop:
     the record to stay intact and usable after a failure.
 
     `elapsed_ms` is the coordinator's own measure of routing time (issue
-    #63) and is None when no node was attempted; `wall_ms` is the whole
-    round trip as the client experienced it. Their difference is the
+    #63) and is None whenever no reply arrived to carry it — which is not
+    the same as no node having been attempted, see below; `wall_ms` is the
+    whole round trip as the client experienced it. Their difference is the
     client-coordinator overhead issue #61 measures.
+
+    **A hop that failed in transport records `exposed=[]` because the
+    client never learned who saw it, which is a floor and not always a
+    count.** For a refused or unreachable coordinator the two coincide:
+    nothing was sent, so nothing was seen. For a timeout they do not. The
+    coordinator may already have handed the content to one or more
+    volunteers who read it; the reply naming them is exactly what never
+    came back. This is reachable with the default timeout, because the
+    coordinator retries on a fresh per-attempt budget with no overall one
+    (issue #59). The client cannot close that gap — it has no channel to
+    learn what it did not hear — so the honest reading of an empty
+    `exposed` on a transport failure is "at least these", not "these".
 
     `frozen=True` stops a Hop's own fields from being rebound (`hop.text =
     ...` raises) — it does not freeze what `sent` or `exposed` point to,
@@ -220,6 +241,9 @@ class Flow:
 
         Counts failed hops exactly like successful ones — a node that read
         the conversation and then rejected or dropped it still read it —
+        subject to the floor described on Hop: a hop that failed in
+        transport contributes nothing, because the client never learned
+        who saw it —
         and reads every entry of a hop's `exposed` list, which holds more
         than one node when the coordinator failed over (issue #63).
 

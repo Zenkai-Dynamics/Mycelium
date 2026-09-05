@@ -393,6 +393,15 @@ much one *person* saw — a single volunteer may run several nodes, so those
 are different questions. A `None` identity key is a node whose account the
 coordinator could not resolve; it still saw the hop.
 
+Read the report as a floor, not a census. A hop that failed in transport —
+the coordinator unreachable, or no reply before the client's timeout —
+contributes nothing to it, because the client never *learned* who saw that
+hop. For an unreachable coordinator nothing was seen and the two readings
+agree. For a timeout they may not: the coordinator can have handed your
+messages to a volunteer who read them and simply not answered in time. The
+client has no channel to find that out afterwards, so what `exposure()`
+gives you is every volunteer it was told about.
+
 A failed hop raises `HopError` and stays in the record:
 
 ```python

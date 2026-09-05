@@ -17,10 +17,14 @@ from pathlib import Path
 
 from mycelium.client import transport
 
-# 10s past coordinator/router.py's own NODE_COMPLETE_TIMEOUT_SECONDS
-# (130s), so the coordinator's timeout fires first and this client gets
-# that specific complete_error reason, rather than giving up first with a
-# vaguer "coordinator did not respond" message of its own.
+# 10s past coordinator/router.py's per-attempt
+# NODE_COMPLETE_TIMEOUT_SECONDS (130s), so on a single attempt the
+# coordinator's timeout fires first and this client gets that specific
+# complete_error reason, rather than giving up first with a vaguer
+# "coordinator did not respond" message of its own. Across a failover it
+# does not hold — the coordinator's retry loop has no overall budget, so
+# each new node gets a fresh 130s. Kept equal to flow.CALL_TIMEOUT_SECONDS
+# and pinned by a test (issue #59).
 CLIENT_COMPLETE_TIMEOUT_SECONDS = 140.0
 
 
