@@ -59,6 +59,18 @@ class Hop:
     #63) and is None when no node was attempted; `wall_ms` is the whole
     round trip as the client experienced it. Their difference is the
     client-coordinator overhead issue #61 measures.
+
+    `frozen=True` stops a Hop's own fields from being rebound (`hop.text =
+    ...` raises) — it does not freeze what `sent` or `exposed` point to,
+    since both are plain lists and a frozen dataclass only guards its own
+    attributes, not the contents of mutable objects it holds. What is
+    actually guaranteed is narrower and lives on `Flow.call`: `sent` is a
+    deep copy taken at call time, so mutating the list the caller passed
+    to `call` afterwards cannot rewrite this Hop. Reaching into
+    `hop.sent` and editing it directly is still possible; nothing here
+    stops that, because the hazard this defends against is an agent
+    accidentally corrupting its own record by reusing and trimming a
+    message list, not a hostile edit of the record after the fact.
     """
 
     index: int

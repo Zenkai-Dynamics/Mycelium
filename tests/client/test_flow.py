@@ -1,21 +1,12 @@
 """Tests for mycelium.client.flow."""
 
-import asyncio
 import json
-import ssl
 
 import pytest
 import websockets
 
 from mycelium.client.flow import Flow, HopError, assistant, system, user
-from mycelium.coordinator import certs, github_identity, server
-
-
-def _client_ssl_context(cert_path):
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    context.check_hostname = False
-    context.load_verify_locations(cafile=str(cert_path))
-    return context
+from mycelium.coordinator import certs, server
 
 
 class _FakeCoordinator:
