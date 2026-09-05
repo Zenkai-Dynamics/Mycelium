@@ -227,7 +227,7 @@ async def test_client_fault_reply_raises_client_request_error():
         await router.route_request(node, [{"role": "user", "content": "hi"}], timeout=2.0)
 
 
-async def test_client_request_error_is_not_a_node_error():
+def test_client_request_error_is_not_a_node_error():
     """It must not be catchable as a NodeError, or an existing handler
     would record a crash for it — the bug issue #58 fixes."""
     assert not issubclass(router.ClientRequestError, router.NodeError)
