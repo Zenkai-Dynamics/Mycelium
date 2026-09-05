@@ -200,8 +200,17 @@ class VLLMProcess:
             # treated as node faults by request_handler's catch-all —
             # there is no client-caused way to make the local loopback
             # connection to vLLM fail. See the design doc for issue #58.
-            message = _error_message(exc.read(), exc.code)
             if 400 <= exc.code < 500 and exc.code not in NODE_FAULT_STATUSES:
-                raise VLLMClientError(message) from exc
-            raise VLLMServerError(message) from exc
+                # The body is relayed only here: it's what makes an
+                # overflow error actionable (it names the limit and the
+                # size requested), and it's the client's own conversation
+                # that produced it, not the volunteer's internals.
+                raise VLLMClientError(_error_message(exc.read(), exc.code)) from exc
+            # Deliberately NOT the body: vLLM (and torch) error strings
+            # routinely embed filesystem paths under the volunteer's home
+            # directory, and a previous issue worked to keep volunteer
+            # identifiers off this wire. The status code is enough — the
+            # operator has vLLM's own logs for the rest. See the design
+            # doc for issue #58.
+            raise VLLMServerError(f"vLLM returned HTTP {exc.code}") from exc
         return body["choices"][0]["message"]["content"]

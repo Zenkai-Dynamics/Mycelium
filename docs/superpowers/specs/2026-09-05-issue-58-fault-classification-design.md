@@ -119,12 +119,26 @@ only where it is meaningful.
 
 ### Fault classification lives in `vllm_process`
 
-`vllm_process.complete` raises `VLLMClientError` or `VLLMServerError`,
-carrying vLLM's own message — parsed from the JSON error body, falling back to
-the raw body when it will not parse or lacks the field, so an unexpected error
-shape still yields something actionable rather than an empty string. That
-message is what makes an overflow error useful: it names the limit and the
-size requested.
+`vllm_process.complete` raises `VLLMClientError` or `VLLMServerError`.
+
+Only `VLLMClientError` carries vLLM's own message — parsed from the JSON
+error body, falling back to the raw body when it will not parse or lacks
+the field, so an unexpected error shape still yields something actionable
+rather than an empty string. That message is what makes an overflow error
+useful: it names the limit and the size requested, and it describes the
+client's own conversation, not the volunteer's internals.
+
+`VLLMServerError` deliberately carries only the status code (`"vLLM
+returned HTTP 500"`), never the body. vLLM and torch exception strings
+routinely embed filesystem paths under the volunteer's home directory,
+and [issue #63](2026-09-05-issue-63-exposure-handles-design.md) worked
+deliberately to keep volunteer identifiers off this exact wire — a node
+fault is exactly the path a hostile or careless client can reach at
+will, so relaying vLLM's raw message here would reopen that leak on
+every 5xx. The node operator still has vLLM's own logs for the full
+message. This also restores this path's pre-branch behavior: before this
+feature existed, a node fault surfaced to the client as `str(HTTPError)`
+with no body either.
 
 `request_handler` maps those to `fault` and stops needing to know `urllib`
 exists — keeping the HTTP boundary owned by the module that owns the HTTP

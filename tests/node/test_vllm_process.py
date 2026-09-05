@@ -211,7 +211,12 @@ def test_server_error_is_a_node_fault(fake_vllm_server):
     with pytest.raises(vllm_process.VLLMServerError) as exc:
         process.complete([{"role": "user", "content": "hi"}])
 
-    assert "engine died" in str(exc.value)
+    assert "500" in str(exc.value)
+    assert "engine died" not in str(exc.value), (
+        "a node-fault message must not relay vLLM's error body — vLLM and "
+        "torch exception strings routinely embed filesystem paths under "
+        "the volunteer's home directory. See the design doc for issue #58."
+    )
 
 
 def test_unparseable_error_body_falls_back_to_the_raw_text(fake_vllm_server):
