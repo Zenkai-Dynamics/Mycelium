@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
@@ -89,3 +90,30 @@ def fingerprint(public_key_b64_str: str) -> str:
     here the way verify_registration_signature handles it."""
     raw_public_key = base64.b64decode(public_key_b64_str)
     return hashlib.sha256(raw_public_key).hexdigest()[:FINGERPRINT_LENGTH]
+
+
+# Opaque-handle length, deliberately NOT equal to FINGERPRINT_LENGTH — a
+# handle and a fingerprint have opposite disclosure properties (a
+# fingerprint identifies a node to the operator; a handle exists so a
+# client cannot identify anything), and different lengths make confusing
+# one for the other visible. See the design doc for issue #63.
+HANDLE_LENGTH = 16
+
+
+def handle(secret: bytes, value: str) -> str:
+    """Opaque, unresolvable identifier for `value`, derived under
+    `secret` — used to tell a client which node and which identity served
+    each hop of its flow without disclosing either.
+
+    HMAC rather than a plain hash, specifically. A node handle's input is
+    the node's base64 public key, and a client holding the shared token
+    can call `status_query` (coordinator/server.py) and get back every
+    registered node's `fingerprint` — which is `sha256(raw_public_key)`
+    truncated to FINGERPRINT_LENGTH. So an unsalted
+    `sha256(public_key)[:HANDLE_LENGTH]` handle would share its first 12
+    characters with a fingerprint the client already has in hand,
+    resolving a handle to a node by prefix match and no work at all. The
+    per-process secret is what makes a handle groupable but not
+    identifying. See the design doc for issue #63 and ADR-0004.
+    """
+    return hmac.new(secret, value.encode("utf-8"), hashlib.sha256).hexdigest()[:HANDLE_LENGTH]

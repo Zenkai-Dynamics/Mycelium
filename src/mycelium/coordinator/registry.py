@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import random
+import secrets
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -101,6 +102,7 @@ class NodeRegistry:
         identity_verifier: Callable[[str], Awaitable[github_identity.GithubIdentity]] | None = None,
         per_identity_cap: int = 3,
         random_source: random.Random | None = None,
+        handle_secret: bytes | None = None,
     ) -> None:
         if not token:
             raise ValueError("token must not be empty")
@@ -137,6 +139,17 @@ class NodeRegistry:
         # by calling random.seed() elsewhere). Tests inject
         # random.Random(<fixed seed>) for reproducible draws.
         self._random = random_source or random.Random()
+        # Per-process and in-memory, exactly like the identity bindings,
+        # bans and reputation counters above — so handles are not
+        # comparable across a coordinator restart. That costs nothing: a
+        # flow lives in one client process. Persisting it would create
+        # the first on-disk artifact capable of linking one client's
+        # flows across time. Injectable for tests only (see
+        # identity_verifier and random_source for the same pattern);
+        # production callers take the random default. Deliberately NOT
+        # derived from the shared token — clients hold that, and could
+        # then resolve every handle. See the design doc for issue #63.
+        self._handle_secret = handle_secret or secrets.token_bytes(32)
 
     def check_token(self, token: Any) -> bool:
         """Constant-time comparison against the configured token. Returns
@@ -357,3 +370,29 @@ class NodeRegistry:
             }
             for n in self._nodes.values()
         ]
+
+    def handles_for(self, public_key: str) -> dict:
+        """Opaque per-coordinator-process handles for the node at
+        `public_key` and for the GitHub identity bound to it — what a
+        client is told about who served its hop.
+
+        A client can group hops by these ("did one volunteer read three
+        of my five hops?") but cannot resolve them to a public key,
+        fingerprint or GitHub login. That distinction is the whole point:
+        ADR-0004's exposure claim has to be checkable by the client
+        without handing clients the volunteer identities issue #56
+        deliberately withholds.
+
+        identity_handle is None if public_key has no bound identity.
+        Registration always binds one, so that shouldn't happen — but a
+        completion must not fail because a reporting field couldn't be
+        built, and None here means "unexpectedly unbound", never
+        "anonymous node".
+        """
+        identity = self._identity_by_key.get(public_key)
+        return {
+            "node_handle": crypto.handle(self._handle_secret, public_key),
+            "identity_handle": (
+                crypto.handle(self._handle_secret, identity.id) if identity is not None else None
+            ),
+        }

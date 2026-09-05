@@ -80,13 +80,17 @@ covered only the successful attempt, time spent on a failed node would be
 silently reattributed to client↔coordinator overhead — inflating the exact
 number #61 exists to measure, and doing it invisibly, since the client
 cannot tell a failover happened. Measured with `time.monotonic()` from the
-start of the loop.
+start of the loop — after `model` validation and `normalize_messages`,
+which are coordinator-side request checking rather than routing. Folding
+them in would inflate `elapsed_ms` and so shrink the reported overhead,
+biasing that number in the direction that hides it.
 
 ### Exposure means "the bytes left the coordinator for this node"
 
 | Outcome | Exposed? |
 |---|---|
-| Send raised (`NodeSendFailedError`) | no — nothing reached the node |
+| Send raised on an already-closed connection (`NodeSendFailedError`) | no — nothing reached the node |
+| Send raised part-way through (`NodeDroppedError`) | yes — the frame may already have hit the transport |
 | Dropped while awaiting reply (`NodeDroppedError`) | yes |
 | Timed out | yes — the node received it and may still be processing |
 | Node reported `complete_error` | yes |
@@ -107,10 +111,37 @@ case where the node probably read the request.
 Because failover can expose more than one node for a single hop, a hop's
 exposure is a **list**, not a single pair.
 
-One residual inaccuracy, recorded rather than papered over: a send that
-succeeds locally but dies before delivery is counted as exposure that never
-happened. The report errs toward over-reporting there, which is the right
-direction for a privacy report to err.
+Which of the two subclasses a failed send raises turns on the connection's
+state sampled *immediately before* the send, not on the send raising.
+`websockets` 17.0.1 (`asyncio/connection.py`, `Connection.send_context`)
+writes nothing at all when the connection is not `OPEN` on entry — that
+branch goes straight to raising `ConnectionClosed`. On an `OPEN`
+connection it instead calls `send_data()`, handing the frame to the
+transport, and only *then* awaits `drain()`; a failure during that drain
+raises `ConnectionClosed` **after** the bytes went to the socket. So a
+backpressured node whose connection dies during the drain may well have
+received the conversation. Only the not-`OPEN` case can honestly claim
+"nothing reached the node", so only it is `NodeSendFailedError`; a
+mid-send failure is a `NodeDroppedError` and counts as exposure.
+
+The residual inaccuracies, recorded rather than papered over, now all
+point the same way: a send that succeeds locally but dies before
+delivery, and a send that fails mid-flight having written nothing useful,
+are both counted as exposure that may never have happened. The report
+errs toward over-reporting, which is the right direction for a privacy
+report to err — under-reporting would be a false privacy claim in the
+flattering direction.
+
+### A client-facing `reason` never names a node
+
+`RoutingError` messages are relayed to the client verbatim as a reply's
+`reason`, so none of them may carry `node_id` — which defaults to the
+volunteer's `socket.gethostname()`. A timeout reply carries exactly one
+entry in `exposed`, so a reason reading `node 'gpu-box.local' did not
+respond` would hand the client the handle to machine-name mapping that
+this whole slice exists to withhold, stable for the coordinator's
+lifetime. The messages still say what went wrong; they just say it about
+"the node" rather than about a named one.
 
 ### Field presence
 

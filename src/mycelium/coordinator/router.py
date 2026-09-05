@@ -18,6 +18,7 @@ import uuid
 
 import websockets
 from websockets.exceptions import ConnectionClosed
+from websockets.protocol import State
 
 from mycelium.coordinator.registry import Node
 
@@ -45,8 +46,47 @@ class NodeTimeoutError(RoutingError):
 class NodeDisconnectedError(RoutingError):
     """Raised when the node's connection is (or becomes) unusable — either
     it was already closed when we tried to send, or it closed while we
-    were waiting for a reply. A caller shouldn't need to (and can't)
-    distinguish those two cases."""
+    were waiting for a reply. Catch this when all you care about is that
+    the node is unusable and another one should be tried; catch one of
+    its two subclasses below when it matters whether the node actually
+    saw the request's content."""
+
+
+class NodeSendFailedError(NodeDisconnectedError):
+    """The connection was already unusable *before* we tried to send — so
+    nothing reached the node, and it saw none of the request's content.
+
+    Raised only when the connection's state was demonstrably not OPEN at
+    the moment route_request went to send. That precondition is what
+    makes the "saw nothing" claim true rather than merely likely: in
+    websockets 17.0.1, Connection.send_context (asyncio/connection.py)
+    writes no bytes at all down its `protocol.state is not expected_state`
+    branch, whereas on an OPEN connection it calls send_data() — handing
+    the frame to the transport — and only *then* awaits drain(). A
+    ConnectionClosed surfacing from that drain would mean the bytes were
+    already on their way. See route_request for how that ambiguous case
+    is classified instead.
+
+    Split out of NodeDisconnectedError for issue #63: this module's
+    docstring used to say a caller "shouldn't need to (and can't)"
+    distinguish a failed send from a mid-flight drop, which was true
+    until exposure reporting existed. It is a subclass, so callers that
+    only care about "this node is gone, try another" are unaffected.
+    """
+
+
+class NodeDroppedError(NodeDisconnectedError):
+    """The connection died at a point where the node may already have
+    received the request — so it must be reported as having seen its
+    content. Two shapes reach here: the connection died while we were
+    awaiting a reply (the node very likely read the request), and a send
+    that failed on a connection that was OPEN when we started (the frame
+    may already have been handed to the transport before the failure).
+
+    The second is deliberately lumped in with the first: issue #63's
+    governing principle is that an ambiguous exposure counts as exposure,
+    because under-reporting is a false privacy claim in the flattering
+    direction. See the design doc for issue #63."""
 
 
 class NodeError(RoutingError):
@@ -70,11 +110,33 @@ async def route_request(
     NodeTimeoutError if no reply arrives within `timeout`, or NodeError if
     the node explicitly reports a failure. `node.pending` never retains an
     entry for this request once this function returns or raises.
+
+    NodeDisconnectedError is never raised directly: it always arrives as
+    one of its two subclasses, and which one is the difference between a
+    node that saw the client's conversation and one that did not.
+    NodeSendFailedError means the connection was already not OPEN before
+    the send, so nothing left the coordinator; NodeDroppedError means the
+    bytes may already have reached the node — it dropped mid-flight, or
+    the send itself failed on a connection that was still OPEN when we
+    started. Catch NodeDisconnectedError when all you need is "this node
+    is unusable, try another"; catch the subclasses when it matters
+    whether the node read the request. See the design doc for issue #63.
     """
     request_id = str(uuid.uuid4())
     future: asyncio.Future = asyncio.get_running_loop().create_future()
     node.pending[request_id] = future
     try:
+        # Sampled *before* the send, because a failed send closes the
+        # connection and the state afterwards is CLOSED either way. This
+        # is the only evidence available that distinguishes a send that
+        # reached nobody from one that may already have put the client's
+        # conversation on the wire: websockets 17.0.1 writes nothing when
+        # the connection is not OPEN on entry to send_context, but on an
+        # OPEN connection it writes the frame to the transport and only
+        # then awaits drain(), so a ConnectionClosed out of that drain
+        # comes *after* the bytes were handed to the socket. Ambiguity
+        # counts as exposure — see the design doc for issue #63.
+        was_open = node.websocket.state is State.OPEN
         try:
             await node.websocket.send(
                 json.dumps(
@@ -82,15 +144,22 @@ async def route_request(
                 )
             )
         except websockets.exceptions.ConnectionClosed as exc:
-            raise NodeDisconnectedError(f"node {node.node_id!r} disconnected: {exc}") from exc
+            if was_open:
+                raise NodeDroppedError(f"node connection closed mid-send: {exc}") from exc
+            raise NodeSendFailedError(f"node connection was already closed: {exc}") from exc
 
         try:
             async with asyncio.timeout(timeout):
                 message = await future
         except TimeoutError:
-            raise NodeTimeoutError(
-                f"node {node.node_id!r} did not respond within {timeout}s"
-            ) from None
+            # Deliberately anonymous. Every RoutingError message here can
+            # end up relayed to the client verbatim as a reply's `reason`,
+            # and node_id defaults to the volunteer's socket.gethostname()
+            # (node/cli.py). A timeout reply carries exactly one exposed
+            # handle, so naming the node would hand the client the
+            # handle -> machine-name mapping that this whole feature
+            # exists to withhold. See the design doc for issue #63.
+            raise NodeTimeoutError(f"node did not respond within {timeout}s") from None
     finally:
         node.pending.pop(request_id, None)
 

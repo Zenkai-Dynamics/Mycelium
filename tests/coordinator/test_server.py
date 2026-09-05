@@ -10,6 +10,7 @@ import time
 
 import pytest
 import websockets
+from websockets.protocol import State
 
 from mycelium import crypto
 from mycelium.coordinator import certs, router, server
@@ -748,11 +749,19 @@ async def _run_fake_node(node_ws, reply_for) -> None:
 class _FakeNodeWebsocket:
     """Stand-in for a node's websocket, for testing
     server._handle_complete_request's failover logic in isolation from a
-    real network connection — mirrors test_router.py's _FakeNodeWebsocket."""
+    real network connection — mirrors test_router.py's _FakeNodeWebsocket.
 
-    def __init__(self, send_raises=None):
+    `state` mirrors websockets' own Connection.state. route_request
+    samples it before sending, so a fake that raises on send must also
+    say whether it was already dead (State.CLOSED — a genuine failed
+    send) or still OPEN (a mid-send failure, which counts as exposure).
+    See the design doc for issue #63.
+    """
+
+    def __init__(self, send_raises=None, state=State.OPEN):
         self.sent: list[str] = []
         self._send_raises = send_raises
+        self.state = state
 
     async def send(self, raw: str) -> None:
         if self._send_raises is not None:
@@ -798,7 +807,8 @@ async def test_complete_request_routes_to_registered_node_and_returns_result(tmp
                     {"type": "complete", "token": "secret-token", "model": "m", "prompt": "hello"}
                 ))
                 response = json.loads(await client_ws.recv())
-                assert response == {"type": "complete_result", "text": "echo: hello"}
+                assert response["type"] == "complete_result"
+                assert response["text"] == "echo: hello"
 
             node_task.cancel()
 
@@ -1008,7 +1018,8 @@ async def test_complete_request_node_reports_failure_is_relayed_to_client(tmp_pa
                     {"type": "complete", "token": "secret-token", "model": "m", "prompt": "hi"}
                 ))
                 response = json.loads(await client_ws.recv())
-                assert response == {"type": "complete_error", "reason": "vLLM exploded"}
+                assert response["type"] == "complete_error"
+                assert response["reason"] == "vLLM exploded"
 
             node_task.cancel()
 
@@ -1286,7 +1297,8 @@ async def test_superseded_node_connection_fails_only_its_own_pending_requests(tm
                 {"type": "complete", "token": "secret-token", "model": "m", "prompt": "new"}
             ))
             new_response = json.loads(await new_client_ws.recv())
-            assert new_response == {"type": "complete_result", "text": "echo: new"}
+            assert new_response["type"] == "complete_result"
+            assert new_response["text"] == "echo: new"
 
         node_task.cancel()
         await old_client_ws.close()
@@ -1382,8 +1394,10 @@ async def test_concurrent_complete_requests_to_same_node_get_correct_replies(tmp
                     response_b = json.loads(await client_b.recv())
 
             await node_task
-            assert response_a == {"type": "complete_result", "text": "reply to: A"}
-            assert response_b == {"type": "complete_result", "text": "reply to: B"}
+            assert response_a["type"] == "complete_result"
+            assert response_a["text"] == "reply to: A"
+            assert response_b["type"] == "complete_result"
+            assert response_b["text"] == "reply to: B"
 
 
 async def test_complete_request_round_robins_across_two_healthy_nodes(tmp_path):
@@ -1439,7 +1453,8 @@ async def test_complete_request_round_robins_across_two_healthy_nodes(tmp_path):
 async def test_complete_request_fails_over_to_healthy_node_when_first_pick_is_dead():
     registry = NodeRegistry("secret-token")
     dead_ws = _FakeNodeWebsocket(
-        send_raises=websockets.exceptions.ConnectionClosedError(None, None)
+        send_raises=websockets.exceptions.ConnectionClosedError(None, None),
+        state=State.CLOSED,
     )
     healthy_ws = _FakeNodeWebsocket()
     registry.register(PUBKEY_A, "node-a", "m", dead_ws)  # registers first -> round robin picks it first
@@ -1461,7 +1476,9 @@ async def test_complete_request_fails_over_to_healthy_node_when_first_pick_is_de
         client_ws, registry, {"token": "secret-token", "model": "m", "prompt": "hi"}
     )
 
-    assert json.loads(client_ws.sent[0]) == {"type": "complete_result", "text": "answer from node-b"}
+    sent = json.loads(client_ws.sent[0])
+    assert sent["type"] == "complete_result"
+    assert sent["text"] == "answer from node-b"
     # node-a's dead connection must have been self-healed out of the registry.
     assert registry.list_nodes() == [
         {
@@ -1509,8 +1526,12 @@ async def test_complete_request_does_not_fail_over_on_timeout(monkeypatch):
 
 async def test_complete_request_returns_error_when_every_node_is_dead():
     registry = NodeRegistry("secret-token")
-    dead_a = _FakeNodeWebsocket(send_raises=websockets.exceptions.ConnectionClosedError(None, None))
-    dead_b = _FakeNodeWebsocket(send_raises=websockets.exceptions.ConnectionClosedError(None, None))
+    dead_a = _FakeNodeWebsocket(
+        send_raises=websockets.exceptions.ConnectionClosedError(None, None), state=State.CLOSED
+    )
+    dead_b = _FakeNodeWebsocket(
+        send_raises=websockets.exceptions.ConnectionClosedError(None, None), state=State.CLOSED
+    )
     registry.register(PUBKEY_A, "node-a", "m", dead_a)
     registry.register(PUBKEY_B, "node-b", "m", dead_b)
 
@@ -1522,6 +1543,13 @@ async def test_complete_request_returns_error_when_every_node_is_dead():
     response = json.loads(client_ws.sent[0])
     assert response["type"] == "complete_error"
     assert registry.list_nodes() == []
+    # The subtle half of the field-presence rule: nodes were attempted,
+    # so `elapsed_ms` is reported, but neither send landed, so nothing was
+    # exposed. The condition for `elapsed_ms` is "at least one node was
+    # attempted", not "at least one node was exposed" — this request
+    # really did spend coordinator time. See the design doc for issue #63.
+    assert response["exposed"] == []
+    assert isinstance(response["elapsed_ms"], int)
 
 
 async def test_registration_rejected_when_identity_is_banned(tmp_path):
@@ -1670,3 +1698,299 @@ async def test_ban_is_checked_before_identity_cap(tmp_path):
                     "type": "registration_rejected",
                     "reason": "this identity has been banned by the operator",
                 }
+
+
+async def test_complete_result_carries_exposure_handles_and_timing(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token",
+        identity_verifier=_fake_identity_verifier, handle_secret=b"s" * 32,
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as node_ws:
+            payload, public_key = _register_payload("node-a", "m")
+            await node_ws.send(json.dumps(payload))
+            await node_ws.recv()
+            node_task = asyncio.create_task(_run_fake_node(
+                node_ws, lambda msg: {"type": "complete_result", "text": "ok"}
+            ))
+
+            async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws:
+                await client_ws.send(json.dumps(
+                    {"type": "complete", "token": "secret-token", "model": "m", "prompt": "hi"}
+                ))
+                response = json.loads(await client_ws.recv())
+
+            node_task.cancel()
+
+    assert len(response["exposed"]) == 1
+    assert response["exposed"][0]["node_handle"] == crypto.handle(b"s" * 32, public_key)
+    assert response["exposed"][0]["identity_handle"]
+    assert isinstance(response["elapsed_ms"], int)
+    # Exactly these keys and nothing else. An allowlist, not a denylist:
+    # a field nobody thought to forbid is how a volunteer's hostname or
+    # fingerprint gets onto the wire unnoticed.
+    assert set(response) == {"type", "text", "exposed", "elapsed_ms"}
+    assert set(response["exposed"][0]) == {"node_handle", "identity_handle"}
+    # The reply must not carry anything that resolves a volunteer.
+    assert "public_key" not in response
+    assert "fingerprint" not in response
+    assert "identity" not in response
+    assert public_key not in json.dumps(response)
+    assert crypto.fingerprint(public_key) not in json.dumps(response)
+
+
+async def test_no_healthy_node_reports_empty_exposure_and_no_timing(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token",
+        identity_verifier=_fake_identity_verifier, handle_secret=b"s" * 32,
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws:
+            await client_ws.send(json.dumps(
+                {"type": "complete", "token": "secret-token", "model": "nope", "prompt": "hi"}
+            ))
+            response = json.loads(await client_ws.recv())
+
+    assert response["type"] == "complete_error"
+    assert response["exposed"] == []
+    assert "elapsed_ms" not in response, (
+        "nothing was routed, so reporting a duration would assert routing took no time"
+    )
+
+
+async def test_malformed_request_reports_empty_exposure(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token",
+        identity_verifier=_fake_identity_verifier, handle_secret=b"s" * 32,
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws:
+            await client_ws.send(json.dumps({
+                "type": "complete", "token": "secret-token", "model": "m",
+                "messages": [{"role": "user"}],
+            }))
+            response = json.loads(await client_ws.recv())
+
+    assert response["type"] == "complete_error"
+    assert response["exposed"] == []
+
+
+async def test_node_reported_failure_still_reports_that_node_as_exposed(tmp_path):
+    """A node that read the request and then failed still read it."""
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token",
+        identity_verifier=_fake_identity_verifier, handle_secret=b"s" * 32,
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as node_ws:
+            payload, public_key = _register_payload("node-a", "m")
+            await node_ws.send(json.dumps(payload))
+            await node_ws.recv()
+            node_task = asyncio.create_task(_run_fake_node(
+                node_ws, lambda msg: {"type": "complete_error", "reason": "vLLM exploded"}
+            ))
+
+            async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws:
+                await client_ws.send(json.dumps(
+                    {"type": "complete", "token": "secret-token", "model": "m", "prompt": "hi"}
+                ))
+                response = json.loads(await client_ws.recv())
+
+            node_task.cancel()
+
+    assert response["type"] == "complete_error"
+    assert response["exposed"][0]["node_handle"] == crypto.handle(b"s" * 32, public_key)
+    assert isinstance(response["elapsed_ms"], int)
+    # Exactly these keys and nothing else, same reasoning as the
+    # complete_result case above.
+    assert set(response) == {"type", "reason", "exposed", "elapsed_ms"}
+    assert set(response["exposed"][0]) == {"node_handle", "identity_handle"}
+
+
+async def test_failover_reports_both_the_dropped_node_and_the_one_that_answered(
+    tmp_path, monkeypatch
+):
+    """The case a single-handle report would silently under-count: node A
+    received the request and then dropped, node B answered. Both read it.
+
+    The mid-flight-drop shape (receive the routed request, then close
+    without replying) is the same one
+    test_complete_request_disconnect_increments_disconnect_counter uses.
+    Node A is picked first deterministically: with no reputation history
+    every candidate weighs the same, so find_node_for_model falls back to
+    registration order.
+    """
+    monkeypatch.setattr(router, "NODE_COMPLETE_TIMEOUT_SECONDS", 30.0)
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token",
+        identity_verifier=_fake_identity_verifier, handle_secret=b"s" * 32,
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+
+        node_a_ws = await websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx)
+        payload_a, public_key_a = _register_payload("node-a", "m")
+        await node_a_ws.send(json.dumps(payload_a))
+        await node_a_ws.recv()
+
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as node_b_ws:
+            payload_b, public_key_b = _register_payload("node-b", "m")
+            await node_b_ws.send(json.dumps(payload_b))
+            await node_b_ws.recv()
+
+            async def a_receives_then_dies():
+                await node_a_ws.recv()
+                await node_a_ws.close()
+
+            async def b_answers():
+                routed = json.loads(await node_b_ws.recv())
+                await node_b_ws.send(json.dumps({
+                    "type": "complete_result",
+                    "request_id": routed["request_id"],
+                    "text": "ok",
+                }))
+
+            a_task = asyncio.create_task(a_receives_then_dies())
+            b_task = asyncio.create_task(b_answers())
+
+            async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws:
+                await client_ws.send(json.dumps(
+                    {"type": "complete", "token": "secret-token", "model": "m", "prompt": "hi"}
+                ))
+                response = json.loads(await client_ws.recv())
+
+            await a_task
+            await b_task
+
+    assert response["type"] == "complete_result"
+    assert [entry["node_handle"] for entry in response["exposed"]] == [
+        crypto.handle(b"s" * 32, public_key_a),
+        crypto.handle(b"s" * 32, public_key_b),
+    ], "the node that received-then-dropped read the request too, and must be reported"
+
+
+async def test_a_timed_out_node_is_reported_as_exposed(monkeypatch):
+    """The design's headline case, and the one that most needs asserting:
+    a node that received the request and never answered is
+    indistinguishable from one that read it and then failed, so the
+    report must assume the volunteer saw it. See the design doc for
+    issue #63."""
+    monkeypatch.setattr(router, "NODE_COMPLETE_TIMEOUT_SECONDS", 0.2)
+    registry = NodeRegistry("secret-token", handle_secret=b"s" * 32)
+    slow_ws = _FakeNodeWebsocket()  # accepts the send, never replies
+    registry.register(PUBKEY_A, "node-a", "m", slow_ws)
+
+    client_ws = _FakeClientWebsocket()
+    await server._handle_complete_request(
+        client_ws, registry, {"token": "secret-token", "model": "m", "prompt": "hi"}
+    )
+
+    response = json.loads(client_ws.sent[0])
+    assert response["type"] == "complete_error"
+    assert [entry["node_handle"] for entry in response["exposed"]] == [
+        crypto.handle(b"s" * 32, PUBKEY_A)
+    ], "the node read the request and may still be processing it"
+    assert isinstance(response["elapsed_ms"], int)
+
+
+async def test_client_facing_error_reason_never_names_the_node(monkeypatch):
+    """node_id defaults to socket.gethostname() (node/cli.py), and a
+    timeout reply carries exactly one exposed handle — so naming the node
+    in `reason` would hand the client the handle -> machine-name mapping
+    the whole exposure-handle feature exists to withhold. See the design
+    doc for issue #63."""
+    monkeypatch.setattr(router, "NODE_COMPLETE_TIMEOUT_SECONDS", 0.2)
+    registry = NodeRegistry("secret-token", handle_secret=b"s" * 32)
+    registry.register(PUBKEY_A, "volunteer-laptop.local", "m", _FakeNodeWebsocket())
+
+    client_ws = _FakeClientWebsocket()
+    await server._handle_complete_request(
+        client_ws, registry, {"token": "secret-token", "model": "m", "prompt": "hi"}
+    )
+
+    response = json.loads(client_ws.sent[0])
+    assert response["type"] == "complete_error"
+    assert "volunteer-laptop.local" not in json.dumps(response)
+    # Still useful: the client has to be able to tell a timeout from
+    # anything else that could have gone wrong.
+    assert "did not respond" in response["reason"]
+
+
+async def test_a_node_whose_send_failed_is_not_reported_as_exposed(tmp_path, monkeypatch):
+    """NodeSendFailedError means the bytes never left the coordinator, so
+    that node saw nothing and must not appear in the report.
+
+    route_request is faked rather than provoked: a real send-failure
+    needs a node whose socket is dead but which is still registered, and
+    the server's own disconnect cleanup races to unregister it — so the
+    genuine article cannot be staged deterministically end to end. The
+    router-level tests in Task 3 cover raising it for real; this covers
+    the coordinator's handling of it.
+    """
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    routed_to: list[str] = []
+
+    async def send_fails_on_first_node(node, messages, timeout=None):
+        routed_to.append(node.public_key)
+        if len(routed_to) == 1:
+            raise router.NodeSendFailedError(f"node {node.node_id!r} disconnected")
+        return "ok"
+
+    monkeypatch.setattr(router, "route_request", send_fails_on_first_node)
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token",
+        identity_verifier=_fake_identity_verifier, handle_secret=b"s" * 32,
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as node_a_ws:
+            payload_a, public_key_a = _register_payload("node-a", "m")
+            await node_a_ws.send(json.dumps(payload_a))
+            await node_a_ws.recv()
+
+            async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as node_b_ws:
+                payload_b, public_key_b = _register_payload("node-b", "m")
+                await node_b_ws.send(json.dumps(payload_b))
+                await node_b_ws.recv()
+
+                async with websockets.connect(
+                    f"wss://127.0.0.1:{port}", ssl=client_ctx
+                ) as client_ws:
+                    await client_ws.send(json.dumps(
+                        {"type": "complete", "token": "secret-token", "model": "m", "prompt": "hi"}
+                    ))
+                    response = json.loads(await client_ws.recv())
+
+    assert routed_to == [public_key_a, public_key_b]
+    assert [entry["node_handle"] for entry in response["exposed"]] == [
+        crypto.handle(b"s" * 32, public_key_b)
+    ], "node A's send never landed, so it read nothing and must not be reported"

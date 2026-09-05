@@ -120,3 +120,35 @@ def test_canonical_public_key_of_an_already_canonical_string_is_unchanged():
     key = crypto.generate_keypair()
     canonical = crypto.public_key_b64(key)
     assert crypto.canonical_public_key(canonical) == canonical
+
+
+def test_handle_is_stable_for_the_same_secret_and_value():
+    secret = b"a" * 32
+    assert crypto.handle(secret, "some-public-key") == crypto.handle(secret, "some-public-key")
+
+
+def test_handle_differs_for_different_values():
+    secret = b"a" * 32
+    assert crypto.handle(secret, "key-one") != crypto.handle(secret, "key-two")
+
+
+def test_handle_differs_for_different_secrets():
+    """The load-bearing property: a handle must depend on a secret the
+    client does not have. A bare digest of the public key would pass the
+    two tests above and still be trivially resolvable by anyone holding
+    the value."""
+    assert crypto.handle(b"a" * 32, "same-key") != crypto.handle(b"b" * 32, "same-key")
+
+
+def test_handle_is_sixteen_hex_characters():
+    value = crypto.handle(b"a" * 32, "some-public-key")
+    assert len(value) == crypto.HANDLE_LENGTH == 16
+    assert all(character in "0123456789abcdef" for character in value)
+
+
+def test_handle_is_not_the_fingerprint_of_the_same_key():
+    """Different lengths and different derivations — a handle must never
+    be mistakable for the fingerprint the operator status view shows."""
+    private_key = crypto.generate_keypair()
+    public_key = crypto.public_key_b64(private_key)
+    assert crypto.handle(b"a" * 32, public_key) != crypto.fingerprint(public_key)
