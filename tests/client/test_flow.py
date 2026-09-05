@@ -1,5 +1,6 @@
 """Tests for mycelium.client.flow."""
 
+import asyncio
 import json
 
 import pytest
@@ -190,3 +191,131 @@ def test_the_message_helpers_build_plain_dicts():
     assert system("be terse") == {"role": "system", "content": "be terse"}
     assert user("hi") == {"role": "user", "content": "hi"}
     assert assistant("hello") == {"role": "assistant", "content": "hello"}
+
+
+async def test_exposure_groups_by_node_and_by_identity(tmp_path):
+    """Two nodes under one identity is the case the report exists for:
+    the per-identity cap is three, so three nodes can be one person."""
+    fake = _FakeCoordinator(_queued([
+        _result("one", node="node-aaaa", identity="ident-1111"),
+        _result("two", node="node-bbbb", identity="ident-1111"),
+        _result("three", node="node-aaaa", identity="ident-1111"),
+    ]))
+    running, url, cert_path = await _serve_fake(tmp_path, fake)
+
+    try:
+        flow = Flow(url, cert_path, "secret-token")
+        for _ in range(3):
+            await flow.call("m", messages=[user("hi")])
+    finally:
+        running.close()
+        await running.wait_closed()
+
+    exposure = flow.exposure()
+    assert exposure.by_node == {"node-aaaa": [0, 2], "node-bbbb": [1]}
+    assert exposure.by_identity == {"ident-1111": [0, 1, 2]}, (
+        "three hops across two nodes were all seen by one volunteer"
+    )
+
+
+async def test_exposure_keeps_an_unresolved_identity_under_none(tmp_path):
+    """A node whose identity could not be resolved still saw the hop —
+    dropping it would under-report exposure."""
+    fake = _FakeCoordinator(_queued([_result("one", node="node-aaaa", identity=None)]))
+    running, url, cert_path = await _serve_fake(tmp_path, fake)
+
+    try:
+        flow = Flow(url, cert_path, "secret-token")
+        await flow.call("m", messages=[user("hi")])
+    finally:
+        running.close()
+        await running.wait_closed()
+
+    assert flow.exposure().by_identity == {None: [0]}
+
+
+async def test_exposure_counts_a_failed_hop(tmp_path):
+    """The node read the conversation before rejecting it."""
+    fake = _FakeCoordinator(_queued([{
+        "type": "complete_error", "reason": "too long", "fault": "client",
+        "exposed": [{"node_handle": "node-aaaa", "identity_handle": "ident-1111"}],
+        "elapsed_ms": 5,
+    }]))
+    running, url, cert_path = await _serve_fake(tmp_path, fake)
+
+    try:
+        flow = Flow(url, cert_path, "secret-token")
+        with pytest.raises(HopError):
+            await flow.call("m", messages=[user("hi")])
+    finally:
+        running.close()
+        await running.wait_closed()
+
+    assert flow.exposure().by_node == {"node-aaaa": [0]}
+
+
+async def test_a_failover_hop_reports_both_nodes(tmp_path):
+    """#63 makes a hop's exposure a list when the coordinator failed over."""
+    fake = _FakeCoordinator(_queued([{
+        "type": "complete_result", "text": "ok",
+        "exposed": [
+            {"node_handle": "node-aaaa", "identity_handle": "ident-1111"},
+            {"node_handle": "node-bbbb", "identity_handle": "ident-2222"},
+        ],
+        "elapsed_ms": 9,
+    }]))
+    running, url, cert_path = await _serve_fake(tmp_path, fake)
+
+    try:
+        flow = Flow(url, cert_path, "secret-token")
+        await flow.call("m", messages=[user("hi")])
+    finally:
+        running.close()
+        await running.wait_closed()
+
+    exposure = flow.exposure()
+    assert exposure.by_node == {"node-aaaa": [0], "node-bbbb": [0]}
+    assert exposure.by_identity == {"ident-1111": [0], "ident-2222": [0]}
+
+
+async def test_concurrent_calls_are_recorded_in_call_order(tmp_path):
+    """Fanning one question out to several models is a plausible agent
+    shape; the record must read back in the agent's order, not the order
+    the models happened to answer.
+
+    The fake answers slowest for the call made FIRST, so completion order
+    is the reverse of call order. A test whose replies came back in call
+    order would pass even if hops were appended on completion with no
+    index — this one only passes if the index assigned at call time is
+    what orders the record.
+    """
+
+    async def slow_reversed(message):
+        content = message["messages"][0]["content"]
+        await asyncio.sleep({"a": 0.15, "b": 0.10, "c": 0.05}[content])
+        return _result(f"reply to {content}")
+
+    fake = _FakeCoordinator(slow_reversed)
+    running, url, cert_path = await _serve_fake(tmp_path, fake)
+
+    try:
+        flow = Flow(url, cert_path, "secret-token")
+        await asyncio.gather(
+            flow.call("m", messages=[user("a")]),
+            flow.call("m", messages=[user("b")]),
+            flow.call("m", messages=[user("c")]),
+        )
+    finally:
+        running.close()
+        await running.wait_closed()
+
+    assert [hop.index for hop in flow.hops] == [0, 1, 2]
+    assert [hop.sent[0]["content"] for hop in flow.hops] == ["a", "b", "c"], (
+        "the record must follow call order, not the order replies arrived"
+    )
+
+
+def test_the_public_surface_is_importable_from_the_package():
+    from mycelium.client import Exposure, Flow, Hop, HopError, assistant, system, user
+
+    assert all([Exposure, Flow, Hop, HopError, assistant, system, user])

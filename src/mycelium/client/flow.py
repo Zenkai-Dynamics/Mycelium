@@ -84,6 +84,25 @@ class Hop:
     wall_ms: int
 
 
+@dataclass(frozen=True)
+class Exposure:
+    """Which volunteers saw which hops of one flow.
+
+    Both groupings are reported because both questions matter and neither
+    answers the other: `by_node` says how much one machine saw, and
+    `by_identity` says how much one *person* saw — the per-identity cap is
+    three, so three different nodes can be a single volunteer. That is the
+    aggregation ADR-0004 exists to bound.
+
+    A None key in `by_identity` is a node whose bound identity could not be
+    resolved. It is kept rather than dropped: that node still saw the hop,
+    and omitting it would under-report exposure.
+    """
+
+    by_node: dict[str, list[int]]
+    by_identity: dict[str | None, list[int]]
+
+
 class HopError(Exception):
     """A hop failed. Carries the node's reason, the `fault` that says whose
     mistake it was (issue #58 — "client" means fix the request, "node"
@@ -183,3 +202,21 @@ class Flow:
         )
         self._hops.append(hop)
         raise HopError(reason, hop.fault, hop)
+
+    def exposure(self) -> Exposure:
+        """Group this flow's hops by the volunteer that saw them.
+
+        Counts failed hops exactly like successful ones — a node that read
+        the conversation and then rejected or dropped it still read it —
+        and counts every entry of a hop's `exposed` list, which holds more
+        than one node when the coordinator failed over (issue #63).
+
+        Returns data, not a rendering: formatting belongs to the agent.
+        """
+        by_node: dict[str, list[int]] = {}
+        by_identity: dict[str | None, list[int]] = {}
+        for hop in self.hops:
+            for entry in hop.exposed:
+                by_node.setdefault(entry["node_handle"], []).append(hop.index)
+                by_identity.setdefault(entry.get("identity_handle"), []).append(hop.index)
+        return Exposure(by_node=by_node, by_identity=by_identity)
