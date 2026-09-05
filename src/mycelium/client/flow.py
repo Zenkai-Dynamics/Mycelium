@@ -220,8 +220,17 @@ class Flow:
 
         Counts failed hops exactly like successful ones — a node that read
         the conversation and then rejected or dropped it still read it —
-        and counts every entry of a hop's `exposed` list, which holds more
+        and reads every entry of a hop's `exposed` list, which holds more
         than one node when the coordinator failed over (issue #63).
+
+        Each list answers "which hops did this volunteer see", so a hop
+        appears in it at most once. That is free for `by_node`, since the
+        coordinator never routes a hop to the same node twice, but not for
+        `by_identity`: a failover onto a second machine belonging to the
+        same volunteer is a designed-for state — the per-identity cap is
+        three nodes — and counting it twice would report a volunteer as
+        having seen more hops than the flow has. The lists are built in
+        ascending hop order, so checking the last element is enough.
 
         Returns data, not a rendering: formatting belongs to the agent.
         """
@@ -229,6 +238,11 @@ class Flow:
         by_identity: dict[str | None, list[int]] = {}
         for hop in self.hops:
             for entry in hop.exposed:
-                by_node.setdefault(entry["node_handle"], []).append(hop.index)
-                by_identity.setdefault(entry.get("identity_handle"), []).append(hop.index)
+                for grouping, key in (
+                    (by_node, entry["node_handle"]),
+                    (by_identity, entry.get("identity_handle")),
+                ):
+                    hops_seen = grouping.setdefault(key, [])
+                    if not hops_seen or hops_seen[-1] != hop.index:
+                        hops_seen.append(hop.index)
         return Exposure(by_node=by_node, by_identity=by_identity)

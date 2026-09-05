@@ -300,13 +300,23 @@ async def test_exposure_counts_a_failed_hop(tmp_path):
     assert flow.exposure().by_node == {"node-aaaa": [0]}
 
 
-async def test_a_failover_hop_reports_both_nodes(tmp_path):
-    """#63 makes a hop's exposure a list when the coordinator failed over."""
+async def test_a_failover_hop_reports_each_node_and_each_identity_once(tmp_path):
+    """#63 makes a hop's exposure a list when the coordinator failed over.
+
+    Two of the three nodes here are bound to one identity, which is a
+    designed-for state rather than a curiosity: the per-identity cap is
+    three nodes, so a failover can land on the same volunteer's second
+    machine. The coordinator never repeats a *node* within a hop, so
+    `by_node` is safe by construction, but a per-identity list that
+    appended unconditionally would report `{"ident-1111": [0, 0]}` — and
+    the consumer in docs/OPERATIONS.md would print "saw 2 of 1 hops".
+    """
     fake = _FakeCoordinator(_queued([{
         "type": "complete_result", "text": "ok",
         "exposed": [
             {"node_handle": "node-aaaa", "identity_handle": "ident-1111"},
-            {"node_handle": "node-bbbb", "identity_handle": "ident-2222"},
+            {"node_handle": "node-bbbb", "identity_handle": "ident-1111"},
+            {"node_handle": "node-cccc", "identity_handle": "ident-2222"},
         ],
         "elapsed_ms": 9,
     }]))
@@ -320,8 +330,10 @@ async def test_a_failover_hop_reports_both_nodes(tmp_path):
         await running.wait_closed()
 
     exposure = flow.exposure()
-    assert exposure.by_node == {"node-aaaa": [0], "node-bbbb": [0]}
-    assert exposure.by_identity == {"ident-1111": [0], "ident-2222": [0]}
+    assert exposure.by_node == {"node-aaaa": [0], "node-bbbb": [0], "node-cccc": [0]}
+    assert exposure.by_identity == {"ident-1111": [0], "ident-2222": [0]}, (
+        "one volunteer saw one hop, however many of their nodes it touched"
+    )
 
 
 async def test_concurrent_calls_are_recorded_in_call_order(tmp_path):

@@ -154,6 +154,13 @@ whose bound identity could not be resolved still saw the hop; omitting it
 would under-report exposure, the failure direction #63's fix wave existed to
 close.
 
+**A hop appears at most once per key.** Each list answers "which hops did this
+volunteer see". `by_node` gets that for free — a hop is never routed to the
+same node twice — but a failover onto a second machine bound to the same
+identity is a designed-for state, since the per-identity cap is three nodes,
+and appending unconditionally would report a volunteer as having seen more
+hops than the flow has.
+
 ### Hops are appended on completion, and `hops` is ordered by index
 
 A hop's index is assigned when the call *starts*, so `asyncio.gather` across
