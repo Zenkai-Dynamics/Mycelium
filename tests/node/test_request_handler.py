@@ -4,6 +4,7 @@ import asyncio
 import json
 
 from mycelium.node.request_handler import handle_messages
+from mycelium.node.vllm_process import VLLMClientError, VLLMServerError
 
 
 class _FakeProcess:
@@ -116,7 +117,63 @@ async def test_handle_messages_replies_with_error_when_complete_raises():
     await handler_task
 
     reply = json.loads(websocket.sent[0])
-    assert reply == {"type": "complete_error", "request_id": "abc", "reason": "vLLM exploded"}
+    assert reply == {
+        "type": "complete_error", "request_id": "abc",
+        "reason": "vLLM exploded", "fault": "node",
+    }
+
+
+async def test_client_error_is_reported_as_a_client_fault():
+    process = _FakeProcess(error=VLLMClientError("context too long"))
+    websocket = _FakeWebsocket([
+        json.dumps({"type": "complete", "request_id": "abc",
+                    "messages": [{"role": "user", "content": "hi"}]})
+    ])
+
+    handler_task = asyncio.create_task(handle_messages(websocket, process))
+    await asyncio.sleep(0.05)  # let the spawned per-message task finish and reply
+    websocket.close_from_test()
+    await handler_task
+
+    reply = json.loads(websocket.sent[0])
+    assert reply == {
+        "type": "complete_error", "request_id": "abc",
+        "reason": "context too long", "fault": "client",
+    }
+
+
+async def test_server_error_is_reported_as_a_node_fault():
+    process = _FakeProcess(error=VLLMServerError("engine died"))
+    websocket = _FakeWebsocket([
+        json.dumps({"type": "complete", "request_id": "abc",
+                    "messages": [{"role": "user", "content": "hi"}]})
+    ])
+
+    handler_task = asyncio.create_task(handle_messages(websocket, process))
+    await asyncio.sleep(0.05)
+    websocket.close_from_test()
+    await handler_task
+
+    reply = json.loads(websocket.sent[0])
+    assert reply["fault"] == "node"
+
+
+async def test_an_unexpected_exception_is_a_node_fault():
+    """Anything that isn't explicitly a client error defaults to the
+    node's fault — the conservative direction."""
+    process = _FakeProcess(error=RuntimeError("something else broke"))
+    websocket = _FakeWebsocket([
+        json.dumps({"type": "complete", "request_id": "abc",
+                    "messages": [{"role": "user", "content": "hi"}]})
+    ])
+
+    handler_task = asyncio.create_task(handle_messages(websocket, process))
+    await asyncio.sleep(0.05)
+    websocket.close_from_test()
+    await handler_task
+
+    reply = json.loads(websocket.sent[0])
+    assert reply["fault"] == "node"
 
 
 async def test_handle_messages_ignores_non_complete_messages():
