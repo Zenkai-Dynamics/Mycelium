@@ -1179,6 +1179,11 @@ async def test_client_fault_is_relayed_with_its_fault_and_exposure(tmp_path):
         }
     ], "vLLM read the conversation before rejecting it, so the node saw it"
     assert isinstance(response["elapsed_ms"], int)
+    # An allowlist, not a denylist: a field nobody thought to forbid is how
+    # a volunteer's hostname or fingerprint gets onto the wire unnoticed.
+    # This reply carries the highest-risk content in the change, so it
+    # follows the same discipline as its sibling tests.
+    assert set(response) == {"type", "reason", "fault", "exposed", "elapsed_ms"}
 
 
 async def test_client_fault_does_not_fail_over_to_another_node(tmp_path):
