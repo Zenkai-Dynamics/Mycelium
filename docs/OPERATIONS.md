@@ -263,10 +263,18 @@ mycelium-coordinator-status \
 ```
 
 ```
-your-hostname [a1b2c3d4e5f6] (github:octocat) [ok:12 timeout:1 crash:0 disconnect:2]: Qwen/Qwen2.5-7B-Instruct
+your-hostname [a1b2c3d4e5f6] (github:octocat) [ok:12 timeout:1 crash:0 disconnect:2 client_faults:0]: Qwen/Qwen2.5-7B-Instruct
 ```
 
 (or `No nodes registered.` if none are currently connected).
+
+`client_faults` counts completions the node itself blamed on the
+client's request (e.g. context exceeding the model's window) rather
+than on itself — see the design doc for issue #58. It is not folded
+into reputation, since the coordinator has no way to verify the claim,
+but a node claiming it constantly is visible here rather than
+invisible: a `client_faults` count that keeps climbing while
+completions don't is worth a second look.
 
 ## Step 5 — Send a completion as a client
 
@@ -285,7 +293,7 @@ exits 1. Reasons you'll actually see:
 | Reason | Meaning |
 |---|---|
 | `no healthy node for model '<model>'` | No node currently registered is hosting that model. Fails immediately — no retry, no queue. |
-| `node '<node-id>' did not respond within 130.0s` | The node accepted the request but never replied (not retried — it might still be running the prompt). |
+| `node did not respond within 130.0s` | The node accepted the request but never replied (not retried — it might still be running the prompt). |
 | *(the node's own error text, unprefixed — e.g. an HTTP error from vLLM)* | The node itself explicitly reported the completion failed; its exception text is passed through as-is. |
 | `coordinator did not respond within 140.0s` | The coordinator itself didn't reply — check it's still running. |
 | `coordinator closed the connection without responding (check --token-file)` | Almost always a bad or missing token. |

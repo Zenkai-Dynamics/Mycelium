@@ -95,6 +95,20 @@ class NodeError(RoutingError):
     timing out or disconnecting."""
 
 
+class ClientRequestError(RoutingError):
+    """The node reported that the CLIENT's request was at fault — most
+    often context exceeding the model's window.
+
+    Deliberately NOT a subclass of NodeError: an existing `except
+    NodeError` site records a crash against the node, and a client's own
+    mistake must never do that. See the design doc for issue #58.
+
+    Raised only when the reply says exactly "client". An absent or
+    unrecognized value is a NodeError, so a node cannot dodge reputation
+    by sending garbage in place of a valid claim.
+    """
+
+
 async def route_request(
     node: Node, messages: list[dict], timeout: float = NODE_COMPLETE_TIMEOUT_SECONDS
 ) -> str:
@@ -107,9 +121,15 @@ async def route_request(
     called, so the node wire has exactly one shape.
 
     Raises NodeDisconnectedError if the connection is or becomes unusable,
-    NodeTimeoutError if no reply arrives within `timeout`, or NodeError if
-    the node explicitly reports a failure. `node.pending` never retains an
-    entry for this request once this function returns or raises.
+    NodeTimeoutError if no reply arrives within `timeout`, NodeError if
+    the node explicitly reports a failure, or ClientRequestError if the
+    node reports that failure was the client's own fault (e.g. context
+    exceeding the model's window). ClientRequestError is deliberately not
+    a NodeError, so a caller distinguishing the two by `except NodeError`
+    must add a separate branch rather than silently treating a client's
+    mistake as the node's — see the design doc for issue #58.
+    `node.pending` never retains an entry for this request once this
+    function returns or raises.
 
     NodeDisconnectedError is never raised directly: it always arrives as
     one of its two subclasses, and which one is the difference between a
@@ -172,4 +192,8 @@ async def route_request(
     # with a "complete_result" or "complete_error" message — anything else
     # coming out of `await future` above is a set_exception, not this
     # branch — so this is always a complete_error at this point.
+    if message.get("fault") == "client":
+        raise ClientRequestError(
+            message.get("reason", "the model rejected the request with no reason given")
+        )
     raise NodeError(message.get("reason", "node reported a failure with no reason given"))

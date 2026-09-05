@@ -196,7 +196,7 @@ async def test_registered_node_appears_in_status_query(tmp_path):
                         "model": "Qwen/Qwen2.5-7B-Instruct",
                         "fingerprint": crypto.fingerprint(public_key),
                         "identity": "octocat",
-                        "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0},
+                        "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0, "client_faults": 0},
                     }],
                 }
 
@@ -264,7 +264,7 @@ async def test_duplicate_public_key_replaces_and_closes_old_connection(tmp_path)
                         "model": "model-b",
                         "fingerprint": crypto.fingerprint(public_key),
                         "identity": "octocat",
-                        "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0},
+                        "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0, "client_faults": 0},
                     }
                 ]
 
@@ -315,7 +315,7 @@ async def test_reregistration_with_non_canonical_public_key_spelling_is_treated_
                             "model": "model-b",
                             "fingerprint": crypto.fingerprint(canonical_public_key),
                             "identity": "octocat",
-                            "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0},
+                            "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0, "client_faults": 0},
                         }
                     ]
 
@@ -703,7 +703,7 @@ async def test_silently_unresponsive_node_is_dropped_within_ping_timeout_window(
                     "model": "m",
                     "fingerprint": crypto.fingerprint(public_key),
                     "identity": "octocat",
-                    "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0},
+                    "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0, "client_faults": 0},
                 }],
             }
 
@@ -1055,6 +1055,7 @@ async def test_complete_request_success_increments_completion_counter(tmp_path):
                 response = json.loads(await status_ws.recv())
                 assert response["nodes"][0]["reputation"] == {
                     "completions": 1, "timeouts": 0, "crashes": 0, "disconnects": 0,
+                    "client_faults": 0,
                 }
 
 
@@ -1088,6 +1089,197 @@ async def test_complete_request_node_failure_increments_crash_counter(tmp_path):
                 await status_ws.send(json.dumps({"type": "status_query", "token": "secret-token"}))
                 response = json.loads(await status_ws.recv())
                 assert response["nodes"][0]["reputation"]["crashes"] == 1
+                assert response["nodes"][0]["reputation"]["client_faults"] == 0
+
+
+_CLIENT_FAULT_REPLY = {
+    "type": "complete_error",
+    "reason": "This model's maximum context length is 32768 tokens, "
+              "however you requested 41022 tokens",
+    "fault": "client",
+}
+
+
+async def test_client_fault_leaves_reputation_untouched(tmp_path):
+    """The defect this issue exists to fix: a client sending too much
+    context must not damage an innocent volunteer's reputation."""
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token",
+        identity_verifier=_fake_identity_verifier,
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as node_ws:
+            payload, public_key = _register_payload("node-a", "m")
+            await node_ws.send(json.dumps(payload))
+            await node_ws.recv()
+            node_task = asyncio.create_task(
+                _run_fake_node(node_ws, lambda msg: dict(_CLIENT_FAULT_REPLY))
+            )
+
+            async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws:
+                await client_ws.send(json.dumps(
+                    {"type": "complete", "token": "secret-token", "model": "m", "prompt": "hi"}
+                ))
+                await client_ws.recv()
+
+            node_task.cancel()
+
+            async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as status_ws:
+                await status_ws.send(json.dumps(
+                    {"type": "status_query", "token": "secret-token"}
+                ))
+                response = json.loads(await status_ws.recv())
+
+    reputation = response["nodes"][0]["reputation"]
+    assert reputation["crashes"] == 0, "a client's mistake must not count as a node crash"
+    assert reputation["timeouts"] == 0
+    assert reputation["disconnects"] == 0
+    assert reputation["client_faults"] == 1
+
+
+async def test_client_fault_is_relayed_with_its_fault_and_exposure(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token",
+        identity_verifier=_fake_identity_verifier, handle_secret=b"s" * 32,
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as node_ws:
+            payload, public_key = _register_payload("node-a", "m")
+            await node_ws.send(json.dumps(payload))
+            await node_ws.recv()
+            node_task = asyncio.create_task(
+                _run_fake_node(node_ws, lambda msg: dict(_CLIENT_FAULT_REPLY))
+            )
+
+            async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws:
+                await client_ws.send(json.dumps(
+                    {"type": "complete", "token": "secret-token", "model": "m", "prompt": "hi"}
+                ))
+                response = json.loads(await client_ws.recv())
+
+            node_task.cancel()
+
+    assert response["type"] == "complete_error"
+    assert response["fault"] == "client"
+    assert "maximum context length" in response["reason"]
+    assert response["exposed"] == [
+        {
+            "node_handle": crypto.handle(b"s" * 32, public_key),
+            "identity_handle": response["exposed"][0]["identity_handle"],
+        }
+    ], "vLLM read the conversation before rejecting it, so the node saw it"
+    assert isinstance(response["elapsed_ms"], int)
+    # An allowlist, not a denylist: a field nobody thought to forbid is how
+    # a volunteer's hostname or fingerprint gets onto the wire unnoticed.
+    # This reply carries the highest-risk content in the change, so it
+    # follows the same discipline as its sibling tests.
+    assert set(response) == {"type", "reason", "fault", "exposed", "elapsed_ms"}
+
+
+async def test_client_fault_does_not_fail_over_to_another_node(tmp_path):
+    """A bad request would fail identically on a second volunteer, so
+    retrying only spreads the client's mistake across more nodes."""
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    routed_to: list[str] = []
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token",
+        identity_verifier=_fake_identity_verifier,
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as node_a_ws:
+            payload_a, _ = _register_payload("node-a", "m")
+            await node_a_ws.send(json.dumps(payload_a))
+            await node_a_ws.recv()
+
+            async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as node_b_ws:
+                payload_b, _ = _register_payload("node-b", "m")
+                await node_b_ws.send(json.dumps(payload_b))
+                await node_b_ws.recv()
+
+                def record(node_id):
+                    def reply(msg):
+                        routed_to.append(node_id)
+                        return dict(_CLIENT_FAULT_REPLY)
+                    return reply
+
+                task_a = asyncio.create_task(_run_fake_node(node_a_ws, record("node-a")))
+                task_b = asyncio.create_task(_run_fake_node(node_b_ws, record("node-b")))
+
+                async with websockets.connect(
+                    f"wss://127.0.0.1:{port}", ssl=client_ctx
+                ) as client_ws:
+                    await client_ws.send(json.dumps(
+                        {"type": "complete", "token": "secret-token", "model": "m", "prompt": "hi"}
+                    ))
+                    response = json.loads(await client_ws.recv())
+
+                task_a.cancel()
+                task_b.cancel()
+
+    assert response["fault"] == "client"
+    assert len(routed_to) == 1, f"request was routed to {routed_to} — must not fail over"
+
+
+async def test_coordinator_side_validation_rejection_carries_a_client_fault(tmp_path):
+    """A malformed request is the client's mistake whether vLLM or the
+    coordinator caught it — an agent shouldn't need two code paths."""
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token",
+        identity_verifier=_fake_identity_verifier,
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws:
+            await client_ws.send(json.dumps({
+                "type": "complete", "token": "secret-token", "model": "m",
+                "prompt": "hi", "messages": [{"role": "user", "content": "hi"}],
+            }))
+            response = json.loads(await client_ws.recv())
+
+    assert response["type"] == "complete_error"
+    assert response["fault"] == "client"
+    assert response["exposed"] == []
+
+
+async def test_no_healthy_node_carries_no_fault(tmp_path):
+    """Neither the client's mistake nor any node's — so no fault field."""
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token",
+        identity_verifier=_fake_identity_verifier,
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws:
+            await client_ws.send(json.dumps(
+                {"type": "complete", "token": "secret-token", "model": "nope", "prompt": "hi"}
+            ))
+            response = json.loads(await client_ws.recv())
+
+    assert response["type"] == "complete_error"
+    assert "fault" not in response
 
 
 async def test_complete_request_node_disconnect_mid_request_fails_fast(tmp_path, monkeypatch):
@@ -1209,7 +1401,7 @@ async def test_complete_request_client_disconnect_before_reply_does_not_crash_se
                     "model": "m",
                     "fingerprint": crypto.fingerprint(public_key),
                     "identity": "octocat",
-                    "reputation": {"completions": 1, "timeouts": 0, "crashes": 0, "disconnects": 0},
+                    "reputation": {"completions": 1, "timeouts": 0, "crashes": 0, "disconnects": 0, "client_faults": 0},
                 }
             ]
 
@@ -1486,7 +1678,7 @@ async def test_complete_request_fails_over_to_healthy_node_when_first_pick_is_de
             "model": "m",
             "fingerprint": hashlib.sha256(b"b" * 32).hexdigest()[:12],
             "identity": None,
-            "reputation": {"completions": 1, "timeouts": 0, "crashes": 0, "disconnects": 0},
+            "reputation": {"completions": 1, "timeouts": 0, "crashes": 0, "disconnects": 0, "client_faults": 0},
         }
     ]
 
@@ -1513,13 +1705,13 @@ async def test_complete_request_does_not_fail_over_on_timeout(monkeypatch):
             "node_id": "node-a", "model": "m",
             "fingerprint": hashlib.sha256(b"a" * 32).hexdigest()[:12],
             "identity": None,
-            "reputation": {"completions": 0, "timeouts": 1, "crashes": 0, "disconnects": 0},
+            "reputation": {"completions": 0, "timeouts": 1, "crashes": 0, "disconnects": 0, "client_faults": 0},
         },
         {
             "node_id": "node-b", "model": "m",
             "fingerprint": hashlib.sha256(b"b" * 32).hexdigest()[:12],
             "identity": None,
-            "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0},
+            "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0, "client_faults": 0},
         },
     ]
 

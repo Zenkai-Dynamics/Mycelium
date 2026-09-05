@@ -215,3 +215,42 @@ def test_all_router_errors_are_routing_errors():
     assert issubclass(router.NodeTimeoutError, router.RoutingError)
     assert issubclass(router.NodeDisconnectedError, router.RoutingError)
     assert issubclass(router.NodeError, router.RoutingError)
+
+
+async def test_client_fault_reply_raises_client_request_error():
+    node = _make_node()
+    asyncio.create_task(_resolve_after(node, 0.05, {
+        "type": "complete_error", "reason": "context too long", "fault": "client",
+    }))
+
+    with pytest.raises(router.ClientRequestError, match="context too long"):
+        await router.route_request(node, [{"role": "user", "content": "hi"}], timeout=2.0)
+
+
+def test_client_request_error_is_not_a_node_error():
+    """It must not be catchable as a NodeError, or an existing handler
+    would record a crash for it — the bug issue #58 fixes."""
+    assert not issubclass(router.ClientRequestError, router.NodeError)
+    assert issubclass(router.ClientRequestError, router.RoutingError)
+
+
+async def test_an_unrecognized_fault_value_is_a_node_error():
+    node = _make_node()
+    asyncio.create_task(_resolve_after(node, 0.05, {
+        "type": "complete_error", "reason": "boom", "fault": "banana",
+    }))
+
+    with pytest.raises(router.NodeError):
+        await router.route_request(node, [{"role": "user", "content": "hi"}], timeout=2.0)
+
+
+async def test_a_missing_fault_value_is_a_node_error():
+    """An older node build predates the field; its failures must keep
+    counting exactly as they do today."""
+    node = _make_node()
+    asyncio.create_task(_resolve_after(node, 0.05, {
+        "type": "complete_error", "reason": "boom",
+    }))
+
+    with pytest.raises(router.NodeError):
+        await router.route_request(node, [{"role": "user", "content": "hi"}], timeout=2.0)

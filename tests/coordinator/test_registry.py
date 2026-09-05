@@ -62,7 +62,7 @@ def test_register_adds_node_to_list():
             "model": "Qwen/Qwen2.5-7B-Instruct",
             "fingerprint": _expected_fingerprint(b"a" * 32),
             "identity": None,
-            "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0},
+            "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0, "client_faults": 0},
         }
     ]
 
@@ -85,7 +85,7 @@ def test_register_replacing_same_public_key_returns_superseded_entry():
             "model": "model-b",
             "fingerprint": _expected_fingerprint(b"a" * 32),
             "identity": None,
-            "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0},
+            "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0, "client_faults": 0},
         }
     ]
 
@@ -126,7 +126,7 @@ def test_unregister_does_not_remove_a_newer_replacement():
             "model": "model-b",
             "fingerprint": _expected_fingerprint(b"a" * 32),
             "identity": None,
-            "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0},
+            "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0, "client_faults": 0},
         }
     ]
 
@@ -323,7 +323,7 @@ def test_list_nodes_shows_none_identity_when_never_resolved():
             "model": "model-a",
             "fingerprint": _expected_fingerprint(b"a" * 32),
             "identity": None,
-            "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0},
+            "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0, "client_faults": 0},
         }
     ]
 
@@ -338,7 +338,7 @@ async def test_list_nodes_shows_login_after_resolve_identity():
             "model": "model-a",
             "fingerprint": _expected_fingerprint(b"a" * 32),
             "identity": "octocat",
-            "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0},
+            "reputation": {"completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0, "client_faults": 0},
         }
     ]
 
@@ -450,7 +450,7 @@ def test_record_completion_increments_counter():
     registry.record_completion(PUBKEY_A)
     registry.register(PUBKEY_A, "node-a", "model-a", websocket="ws-a")
     assert registry.list_nodes()[0]["reputation"] == {
-        "completions": 2, "timeouts": 0, "crashes": 0, "disconnects": 0,
+        "completions": 2, "timeouts": 0, "crashes": 0, "disconnects": 0, "client_faults": 0,
     }
 
 
@@ -475,6 +475,28 @@ def test_record_disconnect_increments_counter():
     assert registry.list_nodes()[0]["reputation"]["disconnects"] == 1
 
 
+def test_record_client_fault_increments_counter():
+    registry = NodeRegistry("token")
+    registry.register(PUBKEY_A, "node-a", "m", object())
+
+    registry.record_client_fault(PUBKEY_A)
+
+    assert registry.list_nodes()[0]["reputation"]["client_faults"] == 1
+
+
+def test_client_faults_do_not_affect_routing_weight():
+    """The whole point: a client's mistake must never move routing. A
+    node with many client faults and no real failures must weigh exactly
+    the same as an untouched one."""
+    registry = NodeRegistry("token")
+    registry.register(PUBKEY_A, "node-a", "m", object())
+    registry.register(PUBKEY_B, "node-b", "m", object())
+    for _ in range(50):
+        registry.record_client_fault(PUBKEY_A)
+
+    assert registry._reputation_weight(PUBKEY_A) == registry._reputation_weight(PUBKEY_B)
+
+
 def test_reputation_counters_survive_unregister_and_reregister():
     """The core property this ticket exists for: a disconnect's counter
     must not be discarded when the connection that triggered it is
@@ -492,7 +514,7 @@ def test_list_nodes_shows_zero_reputation_for_node_with_no_recorded_events():
     registry = NodeRegistry("secret")
     registry.register(PUBKEY_A, "node-a", "model-a", websocket="ws-a")
     assert registry.list_nodes()[0]["reputation"] == {
-        "completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0,
+        "completions": 0, "timeouts": 0, "crashes": 0, "disconnects": 0, "client_faults": 0,
     }
 
 

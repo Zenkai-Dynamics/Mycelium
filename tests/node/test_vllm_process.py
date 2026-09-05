@@ -18,6 +18,12 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 RECEIVED_BODIES: list[dict] = []
 
+# Set by a test to make the next /v1/chat/completions call fail with a
+# chosen status and body; cleared by the fake_vllm_server fixture. A dict
+# rather than a module-level rebind so the handler can read it without a
+# `global` declaration, matching RECEIVED_BODIES above.
+RESPONSE_OVERRIDE: dict = {}
+
 
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -55,6 +61,14 @@ class _FakeVLLMHandler(BaseHTTPRequestHandler):
         if self.path == "/v1/chat/completions":
             length = int(self.headers["Content-Length"])
             RECEIVED_BODIES.append(json.loads(self.rfile.read(length)))
+            if RESPONSE_OVERRIDE:
+                body = RESPONSE_OVERRIDE["body"]
+                self.send_response(RESPONSE_OVERRIDE["status"])
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             body = json.dumps(
                 {"choices": [{"message": {"content": "the answer is 42"}}]}
             ).encode()
@@ -73,6 +87,8 @@ class _FakeVLLMHandler(BaseHTTPRequestHandler):
 
 @pytest.fixture
 def fake_vllm_server():
+    RECEIVED_BODIES.clear()
+    RESPONSE_OVERRIDE.clear()
     server = HTTPServer(("127.0.0.1", 0), _FakeVLLMHandler)
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -118,6 +134,113 @@ def test_complete_sends_the_messages_array_through_unchanged(fake_vllm_server):
         "roles must survive to vLLM intact, not be flattened into one user message"
     )
     assert RECEIVED_BODIES[0]["model"] == "test-model"
+
+
+def _overflow_body() -> bytes:
+    """The shape vLLM actually returns for a context-window overflow —
+    `message` at the top level, not nested under `error` as some
+    OpenAI-compatible servers do."""
+    return json.dumps({
+        "object": "error",
+        "message": "This model's maximum context length is 32768 tokens, "
+                   "however you requested 41022 tokens",
+        "type": "BadRequestError",
+        "code": 400,
+    }).encode()
+
+
+def test_context_overflow_raises_client_error_with_vllm_message(fake_vllm_server):
+    RESPONSE_OVERRIDE.update({"status": 400, "body": _overflow_body()})
+    process = VLLMProcess(model="m", port=fake_vllm_server.server_address[1])
+
+    with pytest.raises(vllm_process.VLLMClientError) as exc:
+        process.complete([{"role": "user", "content": "hi"}])
+
+    assert "maximum context length" in str(exc.value)
+    assert "41022" in str(exc.value), (
+        "the requested size is what makes an overflow actionable — it must survive"
+    )
+
+
+def test_model_not_found_is_a_node_fault_despite_being_4xx(fake_vllm_server):
+    """404 means the node registered a model its vLLM isn't serving."""
+    RESPONSE_OVERRIDE.update({
+        "status": 404,
+        "body": json.dumps({"message": "The model `other` does not exist"}).encode(),
+    })
+    process = VLLMProcess(model="m", port=fake_vllm_server.server_address[1])
+
+    with pytest.raises(vllm_process.VLLMServerError):
+        process.complete([{"role": "user", "content": "hi"}])
+
+
+def test_overloaded_statuses_are_node_faults(fake_vllm_server):
+    """408 and 429 are the node's capacity, not a defect in the request."""
+    for status in (408, 429):
+        RESPONSE_OVERRIDE.clear()
+        RESPONSE_OVERRIDE.update({
+            "status": status, "body": json.dumps({"message": "busy"}).encode(),
+        })
+        process = VLLMProcess(model="m", port=fake_vllm_server.server_address[1])
+
+        with pytest.raises(vllm_process.VLLMServerError):
+            process.complete([{"role": "user", "content": "hi"}])
+
+
+def test_auth_and_entity_too_large_statuses_are_node_faults(fake_vllm_server):
+    """401, 403 and 413 are the volunteer's own auth/proxy configuration,
+    not a defect in the request — the same reasoning that carved out
+    404/408/429. See the design doc for issue #58."""
+    for status in (401, 403, 413):
+        RESPONSE_OVERRIDE.clear()
+        RESPONSE_OVERRIDE.update({
+            "status": status, "body": json.dumps({"message": "nope"}).encode(),
+        })
+        process = VLLMProcess(model="m", port=fake_vllm_server.server_address[1])
+
+        with pytest.raises(vllm_process.VLLMServerError):
+            process.complete([{"role": "user", "content": "hi"}])
+
+
+def test_server_error_is_a_node_fault(fake_vllm_server):
+    RESPONSE_OVERRIDE.update({
+        "status": 500, "body": json.dumps({"message": "engine died"}).encode(),
+    })
+    process = VLLMProcess(model="m", port=fake_vllm_server.server_address[1])
+
+    with pytest.raises(vllm_process.VLLMServerError) as exc:
+        process.complete([{"role": "user", "content": "hi"}])
+
+    assert "500" in str(exc.value)
+    assert "engine died" not in str(exc.value), (
+        "a node-fault message must not relay vLLM's error body — vLLM and "
+        "torch exception strings routinely embed filesystem paths under "
+        "the volunteer's home directory. See the design doc for issue #58."
+    )
+
+
+def test_unparseable_error_body_falls_back_to_the_raw_text(fake_vllm_server):
+    """An unexpected error shape must still produce something actionable."""
+    RESPONSE_OVERRIDE.update({"status": 400, "body": b"<html>Bad Request</html>"})
+    process = VLLMProcess(model="m", port=fake_vllm_server.server_address[1])
+
+    with pytest.raises(vllm_process.VLLMClientError) as exc:
+        process.complete([{"role": "user", "content": "hi"}])
+
+    assert "Bad Request" in str(exc.value)
+
+
+def test_nested_error_message_shape_is_also_read(fake_vllm_server):
+    RESPONSE_OVERRIDE.update({
+        "status": 400,
+        "body": json.dumps({"error": {"message": "too many tokens"}}).encode(),
+    })
+    process = VLLMProcess(model="m", port=fake_vllm_server.server_address[1])
+
+    with pytest.raises(vllm_process.VLLMClientError) as exc:
+        process.complete([{"role": "user", "content": "hi"}])
+
+    assert "too many tokens" in str(exc.value)
 
 
 def _process_alive(pid: int) -> bool:

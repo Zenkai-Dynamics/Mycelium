@@ -18,7 +18,7 @@ import json
 
 import websockets
 
-from mycelium.node.vllm_process import VLLMProcess
+from mycelium.node.vllm_process import VLLMClientError, VLLMProcess
 
 
 async def handle_messages(websocket, process: VLLMProcess) -> None:
@@ -50,13 +50,28 @@ async def _handle_complete(websocket, process: VLLMProcess, raw: str) -> None:
     request_id = message.get("request_id")
     messages = message.get("messages")
     try:
-        # Broad except is deliberate here, not sloppy: whatever goes wrong
-        # calling vLLM (HTTP error, timeout, malformed response) becomes a
-        # complete_error the coordinator/client can see, per the design
-        # doc for issue #10 — never left to hang or crash this task.
         text = await asyncio.to_thread(process.complete, messages)
+    except VLLMClientError as exc:
+        # The caller's own request was unacceptable to the model — most
+        # often context exceeding its window. Flagged so the coordinator
+        # can relay it without recording a crash against this node, which
+        # did nothing wrong. See the design doc for issue #58.
+        reply = {
+            "type": "complete_error", "request_id": request_id,
+            "reason": str(exc), "fault": "client",
+        }
     except Exception as exc:
-        reply = {"type": "complete_error", "request_id": request_id, "reason": str(exc)}
+        # Broad except is deliberate here, not sloppy: whatever else goes
+        # wrong calling vLLM (transport failure, timeout, malformed
+        # response) becomes a complete_error the coordinator/client can
+        # see, per the design doc for issue #10 — never left to hang or
+        # crash this task. Everything reaching here is the node's own
+        # fault by definition, since the one client-caused case is caught
+        # above.
+        reply = {
+            "type": "complete_error", "request_id": request_id,
+            "reason": str(exc), "fault": "node",
+        }
     else:
         reply = {"type": "complete_result", "request_id": request_id, "text": text}
 

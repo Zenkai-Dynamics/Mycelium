@@ -56,6 +56,14 @@ class ReputationCounters:
     timeouts: int = 0
     crashes: int = 0
     disconnects: int = 0
+    # Times this node claimed a failure was the CLIENT's fault (issue
+    # #58). Deliberately NOT part of _reputation_weight: a client's
+    # mistake must never move routing, which is the bug #58 fixes. It is
+    # counted at all because the claim is self-reported by an untrusted
+    # volunteer — a node that always claims "client" would otherwise
+    # accrue no signal whatsoever. This makes the claim observable to the
+    # operator without letting it influence anything.
+    client_faults: int = 0
 
 
 class MissingGithubToken(Exception):
@@ -90,6 +98,7 @@ def _reputation_dict(counters: ReputationCounters | None) -> dict:
         "timeouts": counters.timeouts,
         "crashes": counters.crashes,
         "disconnects": counters.disconnects,
+        "client_faults": counters.client_faults,
     }
 
 
@@ -276,11 +285,17 @@ class NodeRegistry:
     def record_disconnect(self, public_key: str) -> None:
         self._reputation.setdefault(public_key, ReputationCounters()).disconnects += 1
 
+    def record_client_fault(self, public_key: str) -> None:
+        self._reputation.setdefault(public_key, ReputationCounters()).client_faults += 1
+
     def _reputation_weight(self, public_key: str) -> float:
         """Laplace-smoothed success rate for public_key — 1.0 for a node
         with no recorded history (never penalizes the unproven), never
         exactly 0 no matter how many failures accumulate. See the design
-        doc for issue #36."""
+        doc for issue #36. client_faults is deliberately excluded from
+        `total`: it's a self-reported, unverifiable claim from an
+        untrusted volunteer, and letting it move routing would recreate
+        the exact bug issue #58 fixes."""
         counters = self._reputation.get(public_key)
         if counters is None:
             return 1.0

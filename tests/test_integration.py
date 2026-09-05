@@ -177,3 +177,120 @@ async def test_full_round_trip_client_through_coordinator_to_node_and_back(tmp_p
         vllm_thread.join()
 
     assert text == "real completion for: what's the capital?"
+
+
+class _FakeVLLMOverflowHandler(BaseHTTPRequestHandler):
+    """Fake vLLM that always rejects a completion with the shape vLLM
+    returns for a real context-window overflow — a genuine HTTP 400,
+    driving the node's real VLLMClientError classification path rather
+    than a hand-written {"fault": "client"} reply."""
+
+    def do_GET(self):
+        if self.path == "/health":
+            self.send_response(200)
+            self.end_headers()
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_POST(self):
+        body = json.dumps(
+            {"message": "This model's maximum context length is 32768 tokens"}
+        ).encode()
+        self.send_response(400)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass
+
+
+async def test_client_fault_propagates_end_to_end_without_recording_a_crash(tmp_path):
+    """Issue #58's central claim, proved across the real seam.
+
+    The literal string "client" is written independently in
+    request_handler.py (the producer) and router.py (the consumer);
+    nothing else in the suite ties the two together — the node-side
+    tests fake the coordinator, and the coordinator-side tests hand-write
+    `{"fault": "client"}` rather than driving a real vLLM rejection. A
+    typo in either literal would leave the rest of the suite green while
+    the original bug (a client's mistake damaging an innocent volunteer's
+    reputation) persisted.
+
+    This test wires the same real components as the round trip above —
+    real VLLMProcess, real request_handler, real router, real registry,
+    a real client connection — with only the vLLM HTTP server faked, and
+    drives a real 400 out of it. It asserts both ends of the guarantee:
+    the client sees `fault == "client"`, and the serving node's `crashes`
+    counter stays 0 while `client_faults` becomes 1. See the design doc
+    for issue #58."""
+    fake_vllm = HTTPServer(("127.0.0.1", 0), _FakeVLLMOverflowHandler)
+    vllm_thread = Thread(target=fake_vllm.serve_forever, daemon=True)
+    vllm_thread.start()
+    try:
+        process = VLLMProcess(model="m", gpu="0", port=fake_vllm.server_address[1])
+
+        cert_path = tmp_path / "cert.pem"
+        key_path = tmp_path / "key.pem"
+        certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+        private_key = crypto.generate_keypair()
+        public_key = crypto.public_key_b64(private_key)
+        signature = crypto.sign_public_key(private_key)
+
+        async with server.serve(
+            "127.0.0.1", 0, cert_path, key_path, "secret-token", identity_verifier=_fake_identity_verifier
+        ) as coordinator:
+            port = coordinator.sockets[0].getsockname()[1]
+
+            async def node_loop():
+                async for websocket in connection.connect(f"wss://127.0.0.1:{port}", cert_path):
+                    await registration.register(
+                        websocket, model="m", node_id="node-a",
+                        public_key=public_key, signature=signature, github_token="valid-github-token",
+                    )
+                    await request_handler.handle_messages(websocket, process)
+
+            node_task = asyncio.create_task(node_loop())
+            await asyncio.sleep(0.3)  # let the node connect and register
+
+            # client_complete() (mycelium.client.cli) is deliberately not
+            # used here: it raises CompletionError carrying only `reason`,
+            # discarding `fault` — see that module's docstring. Talking to
+            # the coordinator on a raw websocket, the same TLS setup the
+            # real client uses (connection.build_ssl_context), is what
+            # lets this test see the wire-level `fault` field the client
+            # process is actually sent.
+            client_ssl = connection.build_ssl_context(cert_path)
+            async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ssl) as client_ws:
+                await client_ws.send(json.dumps(
+                    {
+                        "type": "complete", "token": "secret-token", "model": "m",
+                        "prompt": "way too much context",
+                    }
+                ))
+                response = json.loads(await client_ws.recv())
+
+            async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ssl) as status_ws:
+                await status_ws.send(json.dumps({"type": "status_query", "token": "secret-token"}))
+                status = json.loads(await status_ws.recv())
+
+            node_task.cancel()
+            try:
+                await node_task
+            except asyncio.CancelledError:
+                pass
+
+    finally:
+        fake_vllm.shutdown()
+        vllm_thread.join()
+
+    assert response["type"] == "complete_error"
+    assert response["fault"] == "client"
+    assert "maximum context length" in response["reason"]
+
+    reputation = status["nodes"][0]["reputation"]
+    assert reputation["crashes"] == 0, "a client's mistake must not count as a node crash"
+    assert reputation["client_faults"] == 1
