@@ -345,6 +345,70 @@ malformed entry, or describing the whole array for a malformed list
 Keeping the conversation within the model's context window is the
 caller's job. The node never silently truncates.
 
+### Writing an agent that uses several models
+
+For a task that needs more than one model — a small fast model to draft and
+a larger one to critique, say — the client library carries the task across
+hops while you decide what each hop sees:
+
+```python
+import asyncio
+from pathlib import Path
+from mycelium.client import Flow, HopError, user, assistant
+
+async def main():
+    flow = Flow(
+        "wss://coordinator.example:8765",
+        Path("coordinator.pem"),
+        Path("client-token.txt").read_text().strip(),
+    )
+    task = "Explain why the sky is blue, in two sentences."
+
+    draft = await flow.call("Qwen/Qwen2.5-1.5B-Instruct", messages=[user(task)])
+    review = await flow.call(
+        "Qwen/Qwen2.5-7B-Instruct",
+        messages=[user(f"Improve this answer to: {task}"), assistant(draft.text)],
+    )
+    print(review.text)
+
+    for handle, hops in flow.exposure().by_identity.items():
+        print(f"identity {handle} saw {len(hops)} of {len(flow.hops)} hops")
+
+asyncio.run(main())
+```
+
+**Nothing is sent that a call did not name.** There is no accumulated
+conversation behind `flow`: the second call above sends exactly the two
+messages it lists, and the volunteer serving it never sees the first hop's
+prompt unless you pass it. This is structural rather than a setting — the
+library has no code path that sends unnamed content — and it is why passing
+a previous hop's output is something you write out explicitly.
+
+`flow.hops` is the local record of every hop: what was sent, what came back,
+which volunteer served it, and how long it took. It is never transmitted.
+
+`flow.exposure()` reports which volunteers saw which hops, grouped two ways.
+`by_node` tells you how much one machine saw; `by_identity` tells you how
+much one *person* saw — a single volunteer may run several nodes, so those
+are different questions. A `None` identity key is a node whose account the
+coordinator could not resolve; it still saw the hop.
+
+A failed hop raises `HopError` and stays in the record:
+
+```python
+try:
+    await flow.call("Qwen/Qwen2.5-7B-Instruct", messages=[user(enormous)])
+except HopError as exc:
+    if exc.fault == "client":
+        ...  # your request was the problem — trim it and try again
+    else:
+        ...  # the node's problem — another model or another attempt
+    print(exc.hop.exposed)  # that volunteer read it regardless
+```
+
+Keeping a conversation within a model's context window is your job. The node
+never silently truncates.
+
 ## Step 6 — Ban a misbehaving identity (operator override)
 
 If a volunteer's node needs to be removed for cause — e.g. a report of
