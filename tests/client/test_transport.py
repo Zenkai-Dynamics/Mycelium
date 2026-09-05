@@ -3,7 +3,6 @@
 import asyncio
 import json
 import ssl
-from pathlib import Path
 
 import pytest
 import websockets

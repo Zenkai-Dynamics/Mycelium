@@ -107,13 +107,22 @@ async def test_complete_raises_on_error_reply(tmp_path):
 
 
 async def test_complete_raises_on_wrong_token(tmp_path):
+    """The `match` is the point of this test as much as the raise is.
+
+    complete() detects this case by looking for a substring of
+    transport's message so it can keep its own "--token-file" wording,
+    which names the flag this CLI actually has (issue #59). Nothing else
+    in the suite asserts any transport message text, so without this a
+    reworded transport would silently degrade the CLI to a generic
+    message with every test still green.
+    """
     cert_path = tmp_path / "cert.pem"
     key_path = tmp_path / "key.pem"
     certs.ensure_cert(cert_path, key_path, "127.0.0.1")
 
     async with server.serve("127.0.0.1", 0, cert_path, key_path, "secret-token") as coordinator:
         port = coordinator.sockets[0].getsockname()[1]
-        with pytest.raises(CompletionError):
+        with pytest.raises(CompletionError, match="--token-file"):
             await complete(f"wss://127.0.0.1:{port}", cert_path, "wrong-token", "m", "hi")
 
 
