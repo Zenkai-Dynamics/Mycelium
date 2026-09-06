@@ -165,9 +165,15 @@ def _print_exposure(flow: Flow, who_served_unknown: bool) -> None:
         # Claims neither that a reply arrived nor that one didn't, and
         # neither that the content was seen nor that it wasn't. All four
         # are possible on the paths this fires on (see above); a floor is
-        # the strongest statement true on every one of them. See Hop's
-        # docstring in the flow library, and the design doc for issue #59
-        # on why this is a floor.
+        # the strongest statement true on every one of them.
+        #
+        # The design doc for issue #59 is the reference for why exposure
+        # is a floor. The flow library's Hop docstring covers the same
+        # ground for the transport-failure case, but it is not the
+        # authority for the condition tested here: it says `elapsed_ms` is
+        # None "whenever no reply arrived to carry it", which the
+        # no-healthy-node path disproves. That wording is #71's to fix —
+        # it is under src/, and #60 does not touch the library.
         print(
             "\n  note: this client never learned who — if anyone — served "
             "that hop, so read these figures as a floor rather than a count."
@@ -202,8 +208,13 @@ def main(argv: list[str] | None = None) -> int:
             # node-side failures their "node" fault; when it lands, the
             # second group moves to the branch above and this one narrows
             # to genuine transport failures. The exposure section below
-            # says which of the two this was: it reports a count when a
-            # reply arrived and a floor when none did.
+            # does not resolve the ambiguity either, and does not try to:
+            # its caveat is about whether this client learned *who* served
+            # the hop, which is a different question from whether a reply
+            # arrived. A no-healthy-node reply arrives and still names
+            # nobody, so it prints a floor. The three paths that reach
+            # that caveat are indistinguishable from a Hop today — see
+            # _print_exposure — and #71 is what would separate them.
             print("  fault: unattributed — nothing came back saying whose failure this was")
         _print_hops(flow)
         # `elapsed_ms` is the coordinator's own measure of routing time,
