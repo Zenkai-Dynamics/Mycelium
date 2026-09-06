@@ -433,6 +433,36 @@ run it with `--help` to see the options. It is deliberately an example
 rather than part of the installed package: Mycelium ships primitives and
 one demonstration, not an agent framework.
 
+### Seeing which models are available
+
+Rather than guessing a model string and finding out at call time:
+
+```bash
+mycelium-client-models \
+  --coordinator-url wss://coordinator.example:8765 \
+  --coordinator-cert coordinator.pem \
+  --token-file client-token.txt
+```
+
+```
+Qwen/Qwen2.5-1.5B-Instruct  1 node
+Qwen/Qwen2.5-7B-Instruct    2 nodes
+```
+
+From an agent, `await flow.list_models()` returns the same thing as a list
+of `{"model": ..., "healthy_nodes": ...}`.
+
+This is **advisory, not a guarantee**. A volunteer can disconnect between
+the answer and your next call, so a model listed here can still fail at
+call time — the hop fails and surfaces to you, exactly as it would if you
+had guessed the string.
+
+It deliberately shows less than `mycelium-coordinator-status`: model
+strings and counts only, never node fingerprints, the GitHub accounts
+behind them, or reputation counters. Those are the operator's view, and a
+client token should not be able to enumerate the people volunteering
+hardware.
+
 ## Step 6 — Ban a misbehaving identity (operator override)
 
 If a volunteer's node needs to be removed for cause — e.g. a report of
