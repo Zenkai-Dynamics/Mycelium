@@ -193,3 +193,80 @@ command transcripts:
 
 A real bug found during the session becomes its own follow-up ticket rather
 than being silently patched here.
+
+## Attempt 1 — halted before measurement (2026-09-06)
+
+Setup completed, then the box turned out to be unable to run CUDA at all.
+Recorded here because the diagnosis is the useful artifact, and because it
+affects every vLLM user on `a6000`, not just this session.
+
+### Setup that did succeed
+
+- Checkout updated `e30b77f` → `468a497` (five PRs, all of Phase 2). Verified
+  the new surface is live: `mycelium-client --messages-file` (#55),
+  `client_faults` in the status CLI (#58), `examples/draft_then_critique.py`
+  (#60), and `from mycelium.client import Flow` (#59).
+- `Qwen/Qwen2.5-1.5B-Instruct` fetched in 36s (2.9 GB).
+- `~/.mycelium61/` created with a fresh token and TLS cert.
+- Coordinator started and confirmed listening on `0.0.0.0:18765`.
+
+One correction to the runbook: the coordinator's flags are `--cert-file` /
+`--key-file`, not `--cert` / `--key` — `--cert` is ambiguous against
+`--cert-san-ip` and argparse rejects it.
+
+### The blocker
+
+Both nodes died identically loading vLLM:
+
+```
+vllm/platforms/cuda.py:948, in log_warnings
+    device_names = [cls._get_physical_device_name(i) for i in range(device_ids)]
+vllm/third_party/pynvml.py:2609, in nvmlDeviceGetHandleByIndex
+vllm.third_party.pynvml.NVMLError_Unknown: Unknown Error
+```
+
+`log_warnings()` runs at **module import time** (`cuda.py:1010`) and calls
+`nvmlDeviceGetCount()` — the *physical* count, which ignores
+`CUDA_VISIBLE_DEVICES` — then enumerates every index. GPU 3
+(`0000:A1:00.0`) has fallen off the bus, so the enumeration throws and
+`import vllm` fails. **No GPU pinning avoids this**, and it breaks vLLM for
+every user of the box, not only this session.
+
+vLLM selects `NvmlCudaPlatform` vs `NonNvmlCudaPlatform` on whether
+`nvmlInit()` succeeds. It does succeed here — only the *handle* for GPU 3 is
+bad — so vLLM takes the NVML path and dies. Forcing the non-NVML path (a
+supported code path; it is what Jetson uses) via `LD_LIBRARY_PATH` did get
+`import vllm` to succeed.
+
+That only exposed the real wall. **`torch.cuda.device_count()` returns 0**,
+with or without that workaround, for GPUs 0, 1 and 2 individually and with no
+pinning at all:
+
+```
+RuntimeError: CUDA unknown error ... Setting the available devices to be zero.
+count 0
+```
+
+`nvidia-smi` still lists GPUs 0–2 with UUIDs, and the kernel module
+(NVRM 580.173.02) is loaded — but no CUDA context can be created on any
+device. The dead GPU has taken the driver's CUDA state with it; the healthy
+GPUs are collateral damage.
+
+`sudo nvidia-smi -r -i 3` fails for the same underlying reason — NVML cannot
+address the device well enough to reset it.
+
+**Conclusion: no userspace workaround exists.** This needs a reboot, or a
+driver module reload as root. Deferred to when the box is available.
+
+### State left behind
+
+Coordinator and nodes stopped and confirmed gone; port 18765 confirmed
+closed; GPUs back to 4 MiB idle; the `LD_LIBRARY_PATH` stub removed. The
+checkout stays on `main`, the 1.5B stays cached, and `~/.mycelium61/` keeps
+its token and cert — so a resumed attempt starts at "start the coordinator".
+
+### Environment findings worth carrying forward
+
+- **GPU 3 has failed since #49's session** (3 September), which recorded it
+  running another user's job at 100%.
+- Disk is **89% full** (103 GB free) — fine for these weights, worth watching.
