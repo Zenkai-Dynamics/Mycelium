@@ -736,3 +736,52 @@ def test_two_registries_without_an_injected_secret_differ():
     two = NodeRegistry("token")
 
     assert one.handles_for(PUBKEY_A) != two.handles_for(PUBKEY_A)
+
+
+def test_list_models_is_empty_when_nothing_is_registered():
+    assert NodeRegistry("token").list_models() == []
+
+
+def test_list_models_counts_nodes_per_model():
+    registry = NodeRegistry("token")
+    registry.register(PUBKEY_A, "node-a", "model-one", object())
+    registry.register(PUBKEY_B, "node-b", "model-one", object())
+
+    assert registry.list_models() == [{"model": "model-one", "healthy_nodes": 2}]
+
+
+def test_list_models_lists_distinct_models_sorted():
+    """Sorted so the response is deterministic for a given registry state —
+    registry iteration is insertion order, which would otherwise shuffle as
+    volunteers come and go. See the design doc for issue #56."""
+    registry = NodeRegistry("token")
+    registry.register(PUBKEY_A, "node-a", "zeta-model", object())
+    registry.register(PUBKEY_B, "node-b", "alpha-model", object())
+
+    assert registry.list_models() == [
+        {"model": "alpha-model", "healthy_nodes": 1},
+        {"model": "zeta-model", "healthy_nodes": 1},
+    ]
+
+
+def test_list_models_drops_a_model_whose_node_unregistered():
+    registry = NodeRegistry("token")
+    socket_a = object()
+    registry.register(PUBKEY_A, "node-a", "model-one", socket_a)
+    registry.register(PUBKEY_B, "node-b", "model-two", object())
+
+    registry.unregister(PUBKEY_A, socket_a)
+
+    assert registry.list_models() == [{"model": "model-two", "healthy_nodes": 1}]
+
+
+def test_list_models_exposes_nothing_identifying():
+    """The whole point of a separate method: no fingerprint, identity or
+    reputation may reach a client. See the design doc for issue #56."""
+    registry = NodeRegistry("token")
+    registry.register(PUBKEY_A, "node-a", "model-one", object())
+    registry.record_completion(PUBKEY_A)
+
+    (entry,) = registry.list_models()
+
+    assert set(entry) == {"model", "healthy_nodes"}
