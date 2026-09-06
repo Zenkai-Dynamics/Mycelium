@@ -236,6 +236,35 @@ class Flow:
         self._hops.append(hop)
         raise HopError(reason, hop.fault, hop)
 
+    async def list_models(self, timeout: float = CALL_TIMEOUT_SECONDS) -> list[dict]:
+        """Ask the coordinator which models are currently served.
+
+        Returns `[{"model": str, "healthy_nodes": int}, ...]`, sorted by
+        model string. Advisory only — a node can disconnect between this
+        answer and a later call, so it can never be a guarantee; a model
+        that vanishes in between fails that hop like any other.
+
+        Deliberately does NOT touch the flow's record: no content was sent
+        to a node, so there is no hop and nobody saw anything. For the same
+        reason a failure raises TransportError rather than HopError —
+        there would be no Hop to attach and no fault to report. See the
+        design doc for issue #56.
+
+        Added here rather than in issue #59, which omitted it only because
+        the wire request did not exist yet.
+        """
+        reply = await transport.request(
+            self._coordinator_url,
+            self._coordinator_cert,
+            {"type": "list_models", "token": self._token},
+            timeout,
+        )
+        if reply.get("type") != "models":
+            raise transport.TransportError(
+                f"unexpected response from coordinator: {reply!r}"
+            )
+        return reply["models"]
+
     def exposure(self) -> Exposure:
         """Group this flow's hops by the volunteer that saw them.
 

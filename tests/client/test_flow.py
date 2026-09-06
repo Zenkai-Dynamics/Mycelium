@@ -6,6 +6,7 @@ import json
 import pytest
 import websockets
 
+from mycelium.client import transport
 from mycelium.client.flow import Flow, HopError, assistant, system, user
 from mycelium.coordinator import certs, server
 
@@ -385,3 +386,62 @@ def test_the_public_surface_is_importable_from_the_package():
     from mycelium.client import Exposure, Flow, Hop, HopError, assistant, system, user
 
     assert all([Exposure, Flow, Hop, HopError, assistant, system, user])
+
+
+async def test_list_models_returns_what_the_coordinator_reports(tmp_path):
+    fake = _FakeCoordinator(_queued([{
+        "type": "models",
+        "models": [
+            {"model": "small-model", "healthy_nodes": 1},
+            {"model": "big-model", "healthy_nodes": 2},
+        ],
+    }]))
+    running, url, cert_path = await _serve_fake(tmp_path, fake)
+
+    try:
+        flow = Flow(url, cert_path, "secret-token")
+        models = await flow.list_models()
+    finally:
+        running.close()
+        await running.wait_closed()
+
+    assert models == [
+        {"model": "small-model", "healthy_nodes": 1},
+        {"model": "big-model", "healthy_nodes": 2},
+    ]
+    assert fake.received[0] == {"type": "list_models", "token": "secret-token"}
+
+
+async def test_list_models_does_not_touch_the_flow_record(tmp_path):
+    """Discovery is not a hop: nothing was sent to a node, nobody saw
+    anything, and there is no Hop to record. See the design doc for #56."""
+    fake = _FakeCoordinator(_queued([{"type": "models", "models": []}]))
+    running, url, cert_path = await _serve_fake(tmp_path, fake)
+
+    try:
+        flow = Flow(url, cert_path, "secret-token")
+        await flow.list_models()
+    finally:
+        running.close()
+        await running.wait_closed()
+
+    assert flow.hops == []
+    assert flow.exposure().by_node == {}
+
+
+async def test_list_models_propagates_a_transport_failure(tmp_path):
+    """A discovery failure is not a hop failure, so HopError would be the
+    wrong type — there is no Hop to attach and no fault to report."""
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    flow = Flow("wss://127.0.0.1:1", cert_path, "secret-token")
+    with pytest.raises(transport.TransportError):
+        await flow.list_models()
+
+
+def test_transport_error_is_exported_from_the_package():
+    from mycelium.client import TransportError
+
+    assert TransportError is transport.TransportError
