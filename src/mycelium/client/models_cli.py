@@ -60,12 +60,16 @@ async def list_models(
 
 def main() -> None:
     args = parse_args()
-    token = args.token_file.read_text().strip()
     try:
+        token = args.token_file.read_text().strip()
         models = asyncio.run(
             list_models(args.coordinator_url, args.coordinator_cert, token)
         )
-    except QueryError as exc:
+    except (OSError, QueryError) as exc:
+        # OSError covers a missing, unreadable, or directory-as-path token
+        # file (FileNotFoundError/PermissionError/IsADirectoryError are all
+        # subclasses) — that read must fail the same clean way as a
+        # rejected token, not escape as a traceback.
         print(f"error: {exc}", flush=True)
         sys.exit(1)
     if not models:

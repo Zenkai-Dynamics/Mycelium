@@ -2,12 +2,13 @@
 
 import json
 import ssl
+import sys
 
 import pytest
 import websockets
 
 from mycelium import crypto
-from mycelium.client import models_cli
+from mycelium.client import models_cli, transport
 from mycelium.coordinator import certs, github_identity, server
 
 
@@ -69,3 +70,94 @@ async def test_list_models_raises_on_a_rejected_token(tmp_path):
             await models_cli.list_models(
                 f"wss://127.0.0.1:{port}", cert_path, "wrong-token"
             )
+
+
+async def test_list_models_goes_through_the_shared_transport(monkeypatch):
+    """The three tests above would still pass if list_models hand-rolled
+    its own connect-send-receive — exactly the duplication this task
+    exists to prevent. This one pins the actual mechanism: transport.request
+    is called, and with the expected {"type": "list_models", ...} payload."""
+    captured = {}
+
+    async def fake_request(coordinator_url, coordinator_cert, message, timeout):
+        captured["coordinator_url"] = coordinator_url
+        captured["coordinator_cert"] = coordinator_cert
+        captured["message"] = message
+        captured["timeout"] = timeout
+        return {"type": "models", "models": [{"model": "m", "healthy_nodes": 1}]}
+
+    monkeypatch.setattr(transport, "request", fake_request)
+
+    models = await models_cli.list_models("wss://example:8765", "cert.pem", "secret-token")
+
+    assert captured["message"] == {"type": "list_models", "token": "secret-token"}
+    assert models == [{"model": "m", "healthy_nodes": 1}]
+
+
+def test_main_prints_an_error_and_exits_nonzero_when_the_token_file_is_missing(
+    tmp_path, monkeypatch, capsys
+):
+    """args.token_file.read_text() used to run before the try block, so a
+    missing (or unreadable, or directory-as-path) token file raised
+    FileNotFoundError straight at the user instead of a clean error message
+    and exit 1."""
+    cert_path = tmp_path / "cert.pem"
+    cert_path.write_text("placeholder")
+    missing_token_file = tmp_path / "does-not-exist"
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "mycelium-client-models",
+            "--coordinator-url", "wss://example:8765",
+            "--coordinator-cert", str(cert_path),
+            "--token-file", str(missing_token_file),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        models_cli.main()
+
+    assert exc_info.value.code != 0
+    out = capsys.readouterr().out
+    assert out.startswith("error: ")
+
+
+def test_main_exits_nonzero_and_prints_a_message_on_a_rejected_token(
+    tmp_path, monkeypatch, capsys
+):
+    """Verifies main()'s own exit-status contract, not just list_models():
+    a QueryError must reach the user as a message on stdout and a non-zero
+    exit, never a traceback."""
+    cert_path = tmp_path / "cert.pem"
+    cert_path.write_text("placeholder")
+    token_file = tmp_path / "token"
+    token_file.write_text("wrong-token")
+
+    async def fake_list_models(coordinator_url, coordinator_cert, token):
+        raise models_cli.QueryError(
+            "coordinator closed the connection without responding (check the token)"
+        )
+
+    monkeypatch.setattr(models_cli, "list_models", fake_list_models)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "mycelium-client-models",
+            "--coordinator-url", "wss://example:8765",
+            "--coordinator-cert", str(cert_path),
+            "--token-file", str(token_file),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        models_cli.main()
+
+    assert exc_info.value.code != 0
+    out = capsys.readouterr().out
+    assert out == (
+        "error: coordinator closed the connection without responding "
+        "(check the token)\n"
+    )
