@@ -289,11 +289,13 @@ async def test_main_says_exposure_is_a_floor_when_no_reply_arrived(tmp_path, cap
     saw the hop, and the exposure figures understate it.
 
     The coordinator here accepts the connection and reads the frame
-    before closing, which is the only shape that makes the caveat true.
-    An earlier version of this test pointed at a dead port: connection
-    refused, nothing sent, figures exactly right — the one case where
-    printing "floor" would itself be the overclaim. See Hop's docstring
-    and the design doc for issue #59.
+    before closing, so the content really did leave the client and the
+    true count may be more than zero. An earlier version of this test
+    pointed at a dead port: connection refused, nothing sent, true count
+    exactly zero. A floor is true of both, which is why the note claims
+    only a floor — it deliberately does not say "no reply arrived", since
+    the same branch fires on a no-healthy-node reply, which is a reply.
+    See Hop's docstring and the design docs for issues #59 and #71.
     """
     agent = _load_example()
     fake = _SilentCoordinator()
@@ -316,8 +318,15 @@ async def test_main_says_exposure_is_a_floor_when_no_reply_arrived(tmp_path, cap
     # which is what makes the figures a floor rather than a count.
     assert fake.received
     out = capsys.readouterr().out
-    assert "floor" in out
+    # Pinned as a sentence, not a keyword: the exact claim is the point.
+    # Anything stronger than "never learned who served it" would be false
+    # on one of the other two paths this same branch fires on.
+    assert (
+        "  note: this client never learned who — if anyone — served that hop, "
+        "so read these figures as a floor rather than a count." in out
+    )
     assert "never reached a node" not in out
+    assert "no reply arrived" not in out
 
 
 async def test_main_does_not_call_a_full_reply_a_floor(tmp_path, capsys):

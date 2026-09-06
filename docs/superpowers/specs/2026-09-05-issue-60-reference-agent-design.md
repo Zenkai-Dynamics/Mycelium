@@ -124,10 +124,10 @@ entirely was also rejected: it is information the library goes out of its way
 to deliver, and the thing an agent author most needs.
 
 **When `hop.elapsed_ms is None`, one line records that the exposure figures
-are a floor rather than a count** — no reply arrived, so the client never
-learned who, if anyone, saw that hop. #59 established that distinction; an
-example printing exposure after a timeout without it would quietly overclaim,
-which this project's standards forbid.
+are a floor rather than a count** — the client never learned who, if anyone,
+served that hop. #59 established that distinction; an example printing
+exposure after a timeout without it would quietly overclaim, which this
+project's standards forbid.
 
 The trigger is deliberately *not* `fault is None`, which this design
 originally specified and review found to be wrong on nearly every path.
@@ -136,12 +136,30 @@ originally specified and review found to be wrong on nearly every path.
 where it matters. Keyed on `fault`, the example stamped the floor caveat on a
 node crash — three lines after naming the volunteer the same reply said had
 seen the content — and on a refused connection, where nothing was sent and the
-figures are exactly right. `elapsed_ms` is the coordinator's own measure of
-routing time and rides on every reply, so it is `None` precisely when the
-round trip produced no reply, which is the one condition the caveat is true
-under. The wording asserts neither that content was seen nor that it wasn't:
-after a refused connection nothing was sent, after a timeout everything may
-have been, and the client has no channel to learn which.
+figures are exactly right.
+
+`elapsed_ms` is the coordinator's measure of its own routing time, and its
+absence means no routing attempt was ever timed for this hop. It does **not**
+mean no reply arrived — an earlier version of this section claimed `elapsed_ms`
+"rides on every reply", and that is false. `reject()` guards the field with
+`if attempts:`, and `attempts += 1` sits *after* the `raise NoHealthyNodeError`
+in `server.py`'s retry loop, so a `no healthy node for model 'X'` reply carries
+a reason and an empty `exposed` but no `elapsed_ms`.
+
+The branch therefore fires on three situations the client cannot tell apart:
+a refused or unreachable coordinator (nothing sent, true count zero), a
+no-healthy-node reply (nothing routed, true count zero), and a send that got
+no reply back (true count unknown, possibly above zero). From the `Hop` alone
+all three give `elapsed_ms=None`, `exposed=[]` and `fault=None`; only the
+reason string separates them, and matching reason text across a component
+boundary is a pattern this project has rejected before. The coordinator-side
+signal that would make the distinction exact belongs to #71.
+
+So the note claims only what holds on all three: that this client never
+learned who served the hop, and the figures are a floor. That is deliberately
+weaker than the code could be if the coordinator distinguished the cases. It
+asserts neither that a reply arrived nor that one didn't, and neither that
+content was seen nor that it wasn't.
 
 ### The test uses a frame-recording fake coordinator
 

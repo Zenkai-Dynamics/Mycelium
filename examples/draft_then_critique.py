@@ -126,18 +126,33 @@ def _print_hops(flow: Flow) -> None:
             print(f"  got: {hop.text}")
 
 
-def _print_exposure(flow: Flow, no_reply: bool) -> None:
+def _print_exposure(flow: Flow, who_served_unknown: bool) -> None:
     """Print who saw what, and say so honestly when the client cannot know.
 
-    The caveat is keyed off whether a reply arrived, not off `fault`.
-    Every reply the coordinator sends carries `exposed`, so a reply — even
-    one reporting a node crash — names who saw the content and the figures
-    are a count. Only a round trip that produced no reply at all leaves
-    the client unable to know, and that is the single condition the note
-    below is true under. `fault` answers a different question entirely
-    (whose mistake it was) and keying on it made this example contradict
-    itself: printing "the coordinator may already have sent your content
-    to a volunteer" three lines after naming the volunteer that saw it.
+    The caveat is keyed off `elapsed_ms`, not off `fault`. `fault` answers
+    a different question entirely (whose mistake it was), and keying on it
+    made this example contradict itself: it printed "the coordinator may
+    already have sent your content to a volunteer" three lines after
+    naming the volunteer that saw it, because a node crash comes back with
+    a populated `exposed` and no `fault` at all.
+
+    `elapsed_ms` is the coordinator's measure of its own routing time, and
+    its absence means the coordinator never timed a routing attempt for
+    this hop. That covers three situations the client cannot tell apart:
+    a refused or unreachable coordinator (nothing sent, true count zero),
+    a reply saying no healthy node was available (nothing routed, true
+    count zero), and a round trip that sent everything and got no reply
+    back (true count unknown, possibly more than zero).
+
+    So the note below says only what holds across all three — that this
+    client did not learn who served the hop, and the figures are a floor.
+    It is deliberately weaker than the code could be: "no reply arrived"
+    would be false on the no-healthy-node path, where a full reply did
+    arrive. Distinguishing them from the Hop alone is impossible today
+    — all three give `elapsed_ms=None`, `exposed=[]` and `fault=None`, and
+    only the reason string differs, which this project does not match on
+    across a component boundary. Issue #71 is where the coordinator-side
+    signal that would make this exact belongs.
     """
     exposure = flow.exposure()
     print("\nwho saw what:")
@@ -146,16 +161,16 @@ def _print_exposure(flow: Flow, no_reply: bool) -> None:
     for handle, hops in exposure.by_identity.items():
         who = "an unresolved identity" if handle is None else f"identity {handle}"
         print(f"  {who} saw hops {hops}")
-    if no_reply:
-        # Deliberately claims neither that the content was seen nor that
-        # it wasn't. Both are possible here — a refused connection sent
-        # nothing, a timeout may have sent everything — and the client has
-        # no channel to find out which. See Hop's docstring in the flow
-        # library, and the design doc for issue #59 on why this is a floor.
+    if who_served_unknown:
+        # Claims neither that a reply arrived nor that one didn't, and
+        # neither that the content was seen nor that it wasn't. All four
+        # are possible on the paths this fires on (see above); a floor is
+        # the strongest statement true on every one of them. See Hop's
+        # docstring in the flow library, and the design doc for issue #59
+        # on why this is a floor.
         print(
-            "\n  note: no reply arrived for that hop, so this client never "
-            "learned who — if anyone — saw it. Read these figures as a "
-            "floor rather than a count."
+            "\n  note: this client never learned who — if anyone — served "
+            "that hop, so read these figures as a floor rather than a count."
         )
 
 
@@ -191,14 +206,15 @@ def main(argv: list[str] | None = None) -> int:
             # reply arrived and a floor when none did.
             print("  fault: unattributed — nothing came back saying whose failure this was")
         _print_hops(flow)
-        # `elapsed_ms` is the coordinator's own measure of routing time and
-        # rides on every reply, so it is None exactly when no reply
-        # arrived — which is the condition the floor caveat is about.
-        _print_exposure(flow, no_reply=exc.hop.elapsed_ms is None)
+        # `elapsed_ms` is the coordinator's own measure of routing time,
+        # so its absence means no routing attempt was ever timed for this
+        # hop — the client therefore cannot know who served it. That is
+        # the condition the floor caveat is about; see _print_exposure.
+        _print_exposure(flow, who_served_unknown=exc.hop.elapsed_ms is None)
         return 1
 
     _print_hops(flow)
-    _print_exposure(flow, no_reply=False)
+    _print_exposure(flow, who_served_unknown=False)
     print(f"\nresult:\n{flow.hops[-1].text}")
     return 0
 
