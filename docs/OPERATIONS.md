@@ -426,6 +426,13 @@ failure, where blaming a volunteer would be wrong. Branch on `"client"` and
 Keeping a conversation within a model's context window is your job. The node
 never silently truncates.
 
+A complete, runnable version of this flow ships in
+`examples/draft_then_critique.py`. It takes both model names as arguments,
+prints what every hop sent, and reports which volunteers saw which hops —
+run it with `--help` to see the options. It is deliberately an example
+rather than part of the installed package: Mycelium ships primitives and
+one demonstration, not an agent framework.
+
 ## Step 6 — Ban a misbehaving identity (operator override)
 
 If a volunteer's node needs to be removed for cause — e.g. a report of
