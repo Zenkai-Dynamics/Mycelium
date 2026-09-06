@@ -69,12 +69,13 @@ def _close_in_background(websocket) -> None:
 
 async def _handle_node(websocket, registry: NodeRegistry) -> None:
     """Read the first message and dispatch on it: a node registration, a
-    status query, or a client's completion request. A registered node's
+    status query, an operator's ban request, a client's completion
+    request, or a client's model-discovery request. A registered node's
     connection is then held open for routed requests (see
-    _handle_registration below); a status query or completion request
-    gets one response and the connection closes. Anything else — no
-    message within the timeout, malformed JSON, an unrecognized type —
-    closes the connection."""
+    _handle_registration below); every other recognized type gets one
+    response and the connection closes. Anything else — no message
+    within the timeout, malformed JSON, an unrecognized type — closes
+    the connection."""
     try:
         # asyncio.timeout(), not asyncio.wait_for() — see registration.py's
         # matching comment: wait_for has a Python 3.11 cancellation race

@@ -6,8 +6,8 @@ This walks through actually **running** Mycelium end to end: standing up
 a coordinator, connecting a node to it, and sending a completion through
 as a client. It assumes you've already followed
 [SETUP.md](SETUP.md) to get `mycelium-coordinator`, `mycelium-node`,
-`mycelium-coordinator-status`, `mycelium-coordinator-ban`, and
-`mycelium-client` installed.
+`mycelium-coordinator-status`, `mycelium-coordinator-ban`,
+`mycelium-client`, and `mycelium-client-models` installed.
 
 If you just want to confirm a GPU node's vLLM stack works at all,
 without any coordinator involved, skip to
@@ -446,7 +446,7 @@ mycelium-client-models \
 
 ```
 Qwen/Qwen2.5-1.5B-Instruct  1 node
-Qwen/Qwen2.5-7B-Instruct    2 nodes
+Qwen/Qwen2.5-7B-Instruct  2 nodes
 ```
 
 From an agent, `await flow.list_models()` returns the same thing as a list

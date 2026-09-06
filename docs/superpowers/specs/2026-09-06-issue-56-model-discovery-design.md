@@ -97,6 +97,22 @@ be safe in client hands.
 Stated here so #68 does not sweep it up by accident when it separates the
 operator surface.
 
+### Discovery gets its own timeout, not the completion one
+
+Both client entry points — `Flow.list_models` and `mycelium-client-models`
+— share a `DISCOVERY_TIMEOUT_SECONDS` / `LIST_MODELS_TIMEOUT_SECONDS` pair
+(10s), pinned equal by a test the same way the completion pair already is.
+
+It is deliberately not `CALL_TIMEOUT_SECONDS` (140s): that value's own
+comment justifies it as "10s past the coordinator's per-attempt
+`NODE_COMPLETE_TIMEOUT_SECONDS`, so the coordinator's timeout fires
+first" — reasoning about a routed request retried across nodes. A
+`list_models` request never reaches a node; the coordinator answers it
+straight out of its in-memory registry. There is no per-attempt timeout
+to sit behind and no failover loop to survive, so a short, independent
+timeout is the honest one: the coordinator either answers quickly or it
+is not going to.
+
 ## Testing
 
 Follows the existing suite: real local websocket connections, fake external

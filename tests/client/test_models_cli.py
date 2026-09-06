@@ -72,6 +72,21 @@ async def test_list_models_raises_on_a_rejected_token(tmp_path):
             )
 
 
+async def test_list_models_raises_query_error_on_a_malformed_reply(monkeypatch):
+    """A reply with the right `type` but an entry missing `healthy_nodes`
+    used to raise KeyError from main()'s print loop — a traceback where a
+    wrong-type reply already gets a clean QueryError. Both must be
+    treated the same way."""
+
+    async def fake_request(coordinator_url, coordinator_cert, message, timeout):
+        return {"type": "models", "models": [{"model": "m"}]}
+
+    monkeypatch.setattr(transport, "request", fake_request)
+
+    with pytest.raises(models_cli.QueryError):
+        await models_cli.list_models("wss://example:8765", "cert.pem", "secret-token")
+
+
 async def test_list_models_goes_through_the_shared_transport(monkeypatch):
     """The three tests above would still pass if list_models hand-rolled
     its own connect-send-receive — exactly the duplication this task

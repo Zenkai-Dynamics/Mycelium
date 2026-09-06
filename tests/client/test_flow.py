@@ -441,6 +441,50 @@ async def test_list_models_propagates_a_transport_failure(tmp_path):
         await flow.list_models()
 
 
+async def test_list_models_raises_transport_error_on_a_malformed_models_reply(tmp_path):
+    """A reply with the right `type` but a missing `models` key used to
+    raise KeyError on `reply["models"]` — a traceback where a wrong-type
+    reply already gets a clean TransportError. Both must be treated the
+    same way; the coordinator's cert was pinned, but a malformed reply is
+    still not a crash the caller should have to handle specially."""
+    fake = _FakeCoordinator(_queued([{"type": "models"}]))
+    running, url, cert_path = await _serve_fake(tmp_path, fake)
+
+    try:
+        flow = Flow(url, cert_path, "secret-token")
+        with pytest.raises(transport.TransportError):
+            await flow.list_models()
+    finally:
+        running.close()
+        await running.wait_closed()
+
+
+async def test_list_models_interleaved_with_calls_leaves_hop_indices_undisturbed(tmp_path):
+    """list_models never references _hops or _next_index, so it is true by
+    construction that it cannot disturb the hop-index counter — but the
+    flow record is what ADR-0004's exposure claim rests on, so it is worth
+    the cheap proof: a list_models() call between two call()s must not
+    consume an index or leave a stray record."""
+    fake = _FakeCoordinator(_queued([
+        _result("first"),
+        {"type": "models", "models": []},
+        _result("second"),
+    ]))
+    running, url, cert_path = await _serve_fake(tmp_path, fake)
+
+    try:
+        flow = Flow(url, cert_path, "secret-token")
+        await flow.call("m", messages=[user("one")])
+        await flow.list_models()
+        await flow.call("m", messages=[user("two")])
+    finally:
+        running.close()
+        await running.wait_closed()
+
+    assert [hop.index for hop in flow.hops] == [0, 1]
+    assert len(flow.hops) == 2
+
+
 def test_transport_error_is_exported_from_the_package():
     from mycelium.client import TransportError
 

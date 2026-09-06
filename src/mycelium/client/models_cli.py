@@ -18,6 +18,11 @@ from pathlib import Path
 
 from mycelium.client import transport
 
+# Kept equal to flow.DISCOVERY_TIMEOUT_SECONDS and pinned by a test, the
+# same way cli.CLIENT_COMPLETE_TIMEOUT_SECONDS is pinned against
+# flow.CALL_TIMEOUT_SECONDS: a registry lookup never reaches a node, so
+# there is no per-attempt timeout underneath it to sit behind — the
+# coordinator either answers quickly or it is not going to (issue #56).
 LIST_MODELS_TIMEOUT_SECONDS = 10.0
 
 
@@ -53,9 +58,13 @@ async def list_models(
         )
     except transport.TransportError as exc:
         raise QueryError(str(exc)) from None
-    if reply.get("type") != "models":
+    models = reply.get("models") if reply.get("type") == "models" else None
+    if not isinstance(models, list) or any(
+        not isinstance(entry, dict) or "model" not in entry or "healthy_nodes" not in entry
+        for entry in models
+    ):
         raise QueryError(f"unexpected response from coordinator: {reply!r}")
-    return reply["models"]
+    return models
 
 
 def main() -> None:
