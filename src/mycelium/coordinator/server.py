@@ -112,6 +112,10 @@ async def _handle_node(websocket, registry: NodeRegistry) -> None:
         await _handle_complete_request(websocket, registry, message)
         return
 
+    if message_type == "list_models":
+        await _handle_list_models(websocket, registry, message)
+        return
+
     await websocket.close()
 
 
@@ -298,6 +302,28 @@ async def _handle_status_query(websocket, registry: NodeRegistry, message: dict)
         await websocket.close()
         return
     await websocket.send(json.dumps({"type": "status", "nodes": registry.list_nodes()}))
+    await websocket.close()
+
+
+async def _handle_list_models(websocket, registry: NodeRegistry, message: dict) -> None:
+    """A client's model-discovery request: authenticate, return the models
+    currently served with their healthy-node counts, close.
+
+    Gated by the same shared client token as a completion, and deliberately
+    returns strictly less than the operator status view — no fingerprints,
+    no bound identities, no reputation counters. A client token must not be
+    able to enumerate volunteer identities. See the design doc for issue
+    #56.
+
+    Advisory only: a node can disconnect between this reply and the
+    client's next call, so this can never be a guarantee. A model that
+    vanishes in between fails that hop and surfaces to the caller
+    unchanged.
+    """
+    if not registry.check_token(message.get("token")):
+        await websocket.close()
+        return
+    await websocket.send(json.dumps({"type": "models", "models": registry.list_models()}))
     await websocket.close()
 
 
