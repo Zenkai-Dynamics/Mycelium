@@ -36,6 +36,15 @@ from mycelium.client import transport
 # Hop below and the design doc for issue #59).
 CALL_TIMEOUT_SECONDS = 140.0
 
+# Unrelated to CALL_TIMEOUT_SECONDS above: a registry lookup never reaches a
+# node, so there is no per-attempt node timeout to sit behind and no
+# failover loop to survive. The coordinator answers a list_models request
+# out of its in-memory registry — it either replies quickly or it is not
+# going to. Kept equal to models_cli.LIST_MODELS_TIMEOUT_SECONDS and pinned
+# by a test, the same way CALL_TIMEOUT_SECONDS is pinned against
+# cli.CLIENT_COMPLETE_TIMEOUT_SECONDS (issue #56).
+DISCOVERY_TIMEOUT_SECONDS = 10.0
+
 
 def system(content: str) -> dict:
     """A system message. Exists so ADR-0004's documented example is
@@ -235,6 +244,38 @@ class Flow:
         )
         self._hops.append(hop)
         raise HopError(reason, hop.fault, hop)
+
+    async def list_models(self, timeout: float = DISCOVERY_TIMEOUT_SECONDS) -> list[dict]:
+        """Ask the coordinator which models are currently served.
+
+        Returns `[{"model": str, "healthy_nodes": int}, ...]`. The
+        ordering guarantee — sorted by model string — is the registry's,
+        not this method's; see registry.list_models's docstring. Advisory
+        only — a node can disconnect between this answer and a later
+        call, so it can never be a guarantee; a model that vanishes in
+        between fails that hop like any other.
+
+        Deliberately does NOT touch the flow's record: no content was sent
+        to a node, so there is no hop and nobody saw anything. For the same
+        reason a failure raises TransportError rather than HopError —
+        there would be no Hop to attach and no fault to report. See the
+        design doc for issue #56.
+
+        Added here rather than in issue #59, which omitted it only because
+        the wire request did not exist yet.
+        """
+        reply = await transport.request(
+            self._coordinator_url,
+            self._coordinator_cert,
+            {"type": "list_models", "token": self._token},
+            timeout,
+        )
+        models = reply.get("models") if reply.get("type") == "models" else None
+        if not isinstance(models, list):
+            raise transport.TransportError(
+                f"unexpected response from coordinator: {reply!r}"
+            )
+        return models
 
     def exposure(self) -> Exposure:
         """Group this flow's hops by the volunteer that saw them.

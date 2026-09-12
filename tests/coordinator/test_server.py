@@ -2186,3 +2186,109 @@ async def test_a_node_whose_send_failed_is_not_reported_as_exposed(tmp_path, mon
     assert [entry["node_handle"] for entry in response["exposed"]] == [
         crypto.handle(b"s" * 32, public_key_b)
     ], "node A's send never landed, so it read nothing and must not be reported"
+
+
+async def test_list_models_reports_each_served_model_with_its_count(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token",
+        identity_verifier=_fake_identity_verifier,
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as node_a:
+            payload_a, _ = _register_payload("node-a", "model-one")
+            await node_a.send(json.dumps(payload_a))
+            await node_a.recv()
+
+            async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as node_b:
+                payload_b, _ = _register_payload("node-b", "model-two")
+                await node_b.send(json.dumps(payload_b))
+                await node_b.recv()
+
+                async with websockets.connect(
+                    f"wss://127.0.0.1:{port}", ssl=client_ctx
+                ) as client_ws:
+                    await client_ws.send(json.dumps(
+                        {"type": "list_models", "token": "secret-token"}
+                    ))
+                    response = json.loads(await client_ws.recv())
+
+    assert response["type"] == "models"
+    assert response["models"] == [
+        {"model": "model-one", "healthy_nodes": 1},
+        {"model": "model-two", "healthy_nodes": 1},
+    ]
+
+
+async def test_list_models_is_empty_with_no_nodes(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token",
+        identity_verifier=_fake_identity_verifier,
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws:
+            await client_ws.send(json.dumps({"type": "list_models", "token": "secret-token"}))
+            response = json.loads(await client_ws.recv())
+
+    assert response == {"type": "models", "models": []}
+
+
+async def test_list_models_exposes_nothing_that_identifies_a_volunteer(tmp_path):
+    """An allowlist, not a denylist: a field nobody thought to forbid is how
+    a fingerprint or a GitHub login reaches a client-facing wire unnoticed.
+    See the design doc for issue #56."""
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token",
+        identity_verifier=_fake_identity_verifier,
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as node_ws:
+            payload, public_key = _register_payload("node-a", "model-one")
+            await node_ws.send(json.dumps(payload))
+            await node_ws.recv()
+
+            async with websockets.connect(
+                f"wss://127.0.0.1:{port}", ssl=client_ctx
+            ) as client_ws:
+                await client_ws.send(json.dumps(
+                    {"type": "list_models", "token": "secret-token"}
+                ))
+                response = json.loads(await client_ws.recv())
+
+    assert set(response) == {"type", "models"}
+    assert set(response["models"][0]) == {"model", "healthy_nodes"}
+    serialised = json.dumps(response)
+    assert public_key not in serialised
+    assert crypto.fingerprint(public_key) not in serialised
+    assert "octocat" not in serialised
+
+
+async def test_list_models_with_a_wrong_token_is_closed_without_reply(tmp_path):
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    async with server.serve(
+        "127.0.0.1", 0, cert_path, key_path, "secret-token",
+        identity_verifier=_fake_identity_verifier,
+    ) as coordinator:
+        port = coordinator.sockets[0].getsockname()[1]
+        client_ctx = _client_ssl_context(cert_path)
+        async with websockets.connect(f"wss://127.0.0.1:{port}", ssl=client_ctx) as client_ws:
+            await client_ws.send(json.dumps({"type": "list_models", "token": "wrong"}))
+            with pytest.raises(websockets.exceptions.ConnectionClosed):
+                await client_ws.recv()
