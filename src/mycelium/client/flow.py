@@ -66,9 +66,12 @@ class Hop:
     `elapsed_ms` is the coordinator's own measure of routing time (issue
     #63) and is None whenever the coordinator's reply carried no such
     value — either no reply arrived at all, or one arrived before any
-    node was ever attempted (a `no healthy node` rejection). It is not the
-    same as no node having been attempted for every failure, see below: a
-    node that was tried and then crashed or timed out (issue #71) still
+    node was ever attempted. That second case is not only a `no healthy
+    node` rejection: the coordinator answers its own validation
+    rejections before the retry loop starts, and those carry
+    `fault: "client"` with no `elapsed_ms` either. It is not the same as
+    no node having been attempted for every failure, see below: a node
+    that was tried and then crashed or timed out (issue #71) still
     leaves `elapsed_ms` populated; `wall_ms` is the whole round trip as
     the client experienced it. Their difference is the client-coordinator
     overhead issue #61 measures.
