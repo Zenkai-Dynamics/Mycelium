@@ -64,10 +64,14 @@ class Hop:
     the record to stay intact and usable after a failure.
 
     `elapsed_ms` is the coordinator's own measure of routing time (issue
-    #63) and is None whenever no reply arrived to carry it — which is not
-    the same as no node having been attempted, see below; `wall_ms` is the
-    whole round trip as the client experienced it. Their difference is the
-    client-coordinator overhead issue #61 measures.
+    #63) and is None whenever the coordinator's reply carried no such
+    value — either no reply arrived at all, or one arrived before any
+    node was ever attempted (a `no healthy node` rejection). It is not the
+    same as no node having been attempted for every failure, see below: a
+    node that was tried and then crashed or timed out (issue #71) still
+    leaves `elapsed_ms` populated; `wall_ms` is the whole round trip as
+    the client experienced it. Their difference is the client-coordinator
+    overhead issue #61 measures.
 
     **A hop that failed in transport records `exposed=[]` because the
     client never learned who saw it, which is a floor and not always a
