@@ -143,9 +143,12 @@ async def _handle_complete_request(websocket, registry: NodeRegistry, message: d
     exposure like any other failure but is recorded against nobody's
     reputation and is not retried on another node; a plain
     `router.NodeError` still records a crash exactly as before. The
-    reply's `fault` field ("client" or absent) tells the caller the
-    same thing, whether the rejection came from vLLM via the node or
-    from this coordinator's own request validation."""
+    reply's `fault` field ("client", "node", or absent) tells the
+    caller whether the rejection came from vLLM via the node, from
+    this coordinator's own request validation, or from the node
+    itself crashing or timing out on its own account — see the design
+    doc for issue #71. Absent means neither: no healthy node was
+    available for the model at all."""
     if not registry.check_token(message.get("token")):
         await websocket.close()
         return
@@ -234,12 +237,12 @@ async def _handle_complete_request(websocket, registry: NodeRegistry, message: d
         except router.NodeTimeoutError as exc:
             exposed.append(registry.handles_for(node.public_key))
             registry.record_timeout(node.public_key)
-            await reject(str(exc))
+            await reject(str(exc), fault="node")
             return
         except router.NodeError as exc:
             exposed.append(registry.handles_for(node.public_key))
             registry.record_crash(node.public_key)
-            await reject(str(exc))
+            await reject(str(exc), fault="node")
             return
         except router.ClientRequestError as exc:
             # The node received the conversation and vLLM read it before

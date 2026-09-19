@@ -1345,7 +1345,8 @@ async def test_complete_request_timeout_increments_timeout_counter(tmp_path, mon
                 await client_ws.send(json.dumps(
                     {"type": "complete", "token": "secret-token", "model": "m", "prompt": "hi"}
                 ))
-                await client_ws.recv()
+                response = json.loads(await client_ws.recv())
+                assert response["fault"] == "node"
 
             await node_task
 
@@ -2011,11 +2012,12 @@ async def test_node_reported_failure_still_reports_that_node_as_exposed(tmp_path
             node_task.cancel()
 
     assert response["type"] == "complete_error"
+    assert response["fault"] == "node"
     assert response["exposed"][0]["node_handle"] == crypto.handle(b"s" * 32, public_key)
     assert isinstance(response["elapsed_ms"], int)
     # Exactly these keys and nothing else, same reasoning as the
     # complete_result case above.
-    assert set(response) == {"type", "reason", "exposed", "elapsed_ms"}
+    assert set(response) == {"type", "reason", "fault", "exposed", "elapsed_ms"}
     assert set(response["exposed"][0]) == {"node_handle", "identity_handle"}
 
 
