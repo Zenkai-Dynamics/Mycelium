@@ -380,7 +380,7 @@ async def test_main_does_not_call_a_full_reply_a_floor(tmp_path, capsys):
     """
     agent = _load_example()
     fake = _FakeCoordinator(_queued([{
-        "type": "complete_error", "reason": "node crashed mid-generation",
+        "type": "complete_error", "reason": "no healthy node for model 'big-model'",
         "exposed": [{
             "node_handle": "a3f9c2e1b4d6f8a0", "identity_handle": "7b1d4408c2e6f1a3",
         }],

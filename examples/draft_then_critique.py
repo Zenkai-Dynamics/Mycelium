@@ -138,11 +138,15 @@ def _print_exposure(flow: Flow, who_served_unknown: bool) -> None:
 
     `elapsed_ms` is the coordinator's measure of its own routing time, and
     its absence means the coordinator never timed a routing attempt for
-    this hop. That covers three situations the client cannot tell apart:
+    this hop. That covers four situations, three of which the client
+    cannot tell apart:
     a refused or unreachable coordinator (nothing sent, true count zero),
     a reply saying no healthy node was available (nothing routed, true
     count zero), and a round trip that sent everything and got no reply
-    back (true count unknown, possibly more than zero).
+    back (true count unknown, possibly more than zero). A fourth reaches
+    it too — the coordinator's own validation rejection, answered before
+    the retry loop starts — but that one is distinguishable, since it
+    carries `fault: "client"`.
 
     So the note below says only what holds across all three — that this
     client did not learn who served the hop, and the figures are a floor.
@@ -151,10 +155,10 @@ def _print_exposure(flow: Flow, who_served_unknown: bool) -> None:
     arrive. Distinguishing them from the Hop alone is impossible today,
     and stays that way after #71: that issue relays `fault: "node"` for
     a node's own crash or timeout, and both already carried a populated
-    `elapsed_ms` — neither was ever one of these three situations. They
-    remain indistinguishable on purpose: #58 decided a no-healthy-node
-    reply stays faultless, and a client-side transport failure has no
-    coordinator-side signal to relay in the first place.
+    `elapsed_ms` — neither was ever one of these three situations. The
+    three remain indistinguishable on purpose: #58 decided a
+    no-healthy-node reply stays faultless, and a client-side transport
+    failure has no coordinator-side signal to relay in the first place.
     """
     exposure = flow.exposure()
     print("\nwho saw what:")
