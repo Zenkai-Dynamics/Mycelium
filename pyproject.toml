@@ -33,6 +33,7 @@ mycelium-coordinator = "mycelium.coordinator.cli:main"
 mycelium-coordinator-status = "mycelium.coordinator.status_cli:main"
 mycelium-coordinator-ban = "mycelium.coordinator.ban_cli:main"
 mycelium-client = "mycelium.client.cli:main"
+mycelium-client-models = "mycelium.client.models_cli:main"
 
 [tool.setuptools.dynamic]
 version = {attr = "mycelium.__version__"}

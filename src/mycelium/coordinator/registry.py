@@ -386,6 +386,34 @@ class NodeRegistry:
             for n in self._nodes.values()
         ]
 
+    def list_models(self) -> list[dict]:
+        """The distinct models currently served, with how many registered
+        nodes serve each — the client-facing view of the registry.
+
+        Deliberately built up from model strings and counts rather than
+        derived by stripping fields from list_nodes(): a client token must
+        not be able to enumerate volunteer identities, and a subtractive
+        view would expose every future operator-facing field by default
+        until someone remembered to strip it. See the design doc for
+        issue #56.
+
+        Sorted by model string so the response is deterministic for a
+        given registry state — registry iteration is insertion order,
+        which would otherwise shuffle as volunteers come and go.
+
+        "Healthy" means registered: a node that stops answering the
+        keepalive is already evicted (see the design doc for issue #9),
+        so registration is liveness. Advisory only — a node can
+        disconnect between a client's check and its call.
+        """
+        counts: dict[str, int] = {}
+        for node in self._nodes.values():
+            counts[node.model] = counts.get(node.model, 0) + 1
+        return [
+            {"model": model, "healthy_nodes": counts[model]}
+            for model in sorted(counts)
+        ]
+
     def handles_for(self, public_key: str) -> dict:
         """Opaque per-coordinator-process handles for the node at
         `public_key` and for the GitHub identity bound to it — what a

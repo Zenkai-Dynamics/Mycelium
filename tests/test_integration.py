@@ -13,7 +13,7 @@ from threading import Thread
 import websockets
 
 from mycelium import crypto
-from mycelium.client import cli, flow
+from mycelium.client import cli, flow, models_cli
 from mycelium.client.cli import complete as client_complete
 from mycelium.coordinator import certs, router, server
 from mycelium.coordinator import github_identity
@@ -100,6 +100,15 @@ def test_both_client_entry_points_agree_on_the_completion_timeout():
     which one made the call."""
     assert flow.CALL_TIMEOUT_SECONDS == cli.CLIENT_COMPLETE_TIMEOUT_SECONDS
     assert flow.CALL_TIMEOUT_SECONDS == router.NODE_COMPLETE_TIMEOUT_SECONDS + 10.0
+
+
+def test_both_client_entry_points_agree_on_the_discovery_timeout():
+    """The sibling of the completion-timeout agreement test above, for
+    list_models (issue #56). This branch introduced a second pair of
+    client entry points for one request and originally gave them
+    different timeouts (140s vs 10s) — the same defect the completion
+    test above exists to catch, 14x apart."""
+    assert flow.DISCOVERY_TIMEOUT_SECONDS == models_cli.LIST_MODELS_TIMEOUT_SECONDS
 
 
 class _FakeVLLMHandler(BaseHTTPRequestHandler):

@@ -6,6 +6,7 @@ import json
 import pytest
 import websockets
 
+from mycelium.client import transport
 from mycelium.client.flow import Flow, HopError, assistant, system, user
 from mycelium.coordinator import certs, server
 
@@ -385,3 +386,106 @@ def test_the_public_surface_is_importable_from_the_package():
     from mycelium.client import Exposure, Flow, Hop, HopError, assistant, system, user
 
     assert all([Exposure, Flow, Hop, HopError, assistant, system, user])
+
+
+async def test_list_models_returns_what_the_coordinator_reports(tmp_path):
+    fake = _FakeCoordinator(_queued([{
+        "type": "models",
+        "models": [
+            {"model": "small-model", "healthy_nodes": 1},
+            {"model": "big-model", "healthy_nodes": 2},
+        ],
+    }]))
+    running, url, cert_path = await _serve_fake(tmp_path, fake)
+
+    try:
+        flow = Flow(url, cert_path, "secret-token")
+        models = await flow.list_models()
+    finally:
+        running.close()
+        await running.wait_closed()
+
+    assert models == [
+        {"model": "small-model", "healthy_nodes": 1},
+        {"model": "big-model", "healthy_nodes": 2},
+    ]
+    assert fake.received[0] == {"type": "list_models", "token": "secret-token"}
+
+
+async def test_list_models_does_not_touch_the_flow_record(tmp_path):
+    """Discovery is not a hop: nothing was sent to a node, nobody saw
+    anything, and there is no Hop to record. See the design doc for #56."""
+    fake = _FakeCoordinator(_queued([{"type": "models", "models": []}]))
+    running, url, cert_path = await _serve_fake(tmp_path, fake)
+
+    try:
+        flow = Flow(url, cert_path, "secret-token")
+        await flow.list_models()
+    finally:
+        running.close()
+        await running.wait_closed()
+
+    assert flow.hops == []
+    assert flow.exposure().by_node == {}
+
+
+async def test_list_models_propagates_a_transport_failure(tmp_path):
+    """A discovery failure is not a hop failure, so HopError would be the
+    wrong type — there is no Hop to attach and no fault to report."""
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    certs.ensure_cert(cert_path, key_path, "127.0.0.1")
+
+    flow = Flow("wss://127.0.0.1:1", cert_path, "secret-token")
+    with pytest.raises(transport.TransportError):
+        await flow.list_models()
+
+
+async def test_list_models_raises_transport_error_on_a_malformed_models_reply(tmp_path):
+    """A reply with the right `type` but a missing `models` key used to
+    raise KeyError on `reply["models"]` — a traceback where a wrong-type
+    reply already gets a clean TransportError. Both must be treated the
+    same way; the coordinator's cert was pinned, but a malformed reply is
+    still not a crash the caller should have to handle specially."""
+    fake = _FakeCoordinator(_queued([{"type": "models"}]))
+    running, url, cert_path = await _serve_fake(tmp_path, fake)
+
+    try:
+        flow = Flow(url, cert_path, "secret-token")
+        with pytest.raises(transport.TransportError):
+            await flow.list_models()
+    finally:
+        running.close()
+        await running.wait_closed()
+
+
+async def test_list_models_interleaved_with_calls_leaves_hop_indices_undisturbed(tmp_path):
+    """list_models never references _hops or _next_index, so it is true by
+    construction that it cannot disturb the hop-index counter — but the
+    flow record is what ADR-0004's exposure claim rests on, so it is worth
+    the cheap proof: a list_models() call between two call()s must not
+    consume an index or leave a stray record."""
+    fake = _FakeCoordinator(_queued([
+        _result("first"),
+        {"type": "models", "models": []},
+        _result("second"),
+    ]))
+    running, url, cert_path = await _serve_fake(tmp_path, fake)
+
+    try:
+        flow = Flow(url, cert_path, "secret-token")
+        await flow.call("m", messages=[user("one")])
+        await flow.list_models()
+        await flow.call("m", messages=[user("two")])
+    finally:
+        running.close()
+        await running.wait_closed()
+
+    assert [hop.index for hop in flow.hops] == [0, 1]
+    assert len(flow.hops) == 2
+
+
+def test_transport_error_is_exported_from_the_package():
+    from mycelium.client import TransportError
+
+    assert TransportError is transport.TransportError
