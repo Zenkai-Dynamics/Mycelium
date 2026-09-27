@@ -138,21 +138,27 @@ def _print_exposure(flow: Flow, who_served_unknown: bool) -> None:
 
     `elapsed_ms` is the coordinator's measure of its own routing time, and
     its absence means the coordinator never timed a routing attempt for
-    this hop. That covers three situations the client cannot tell apart:
+    this hop. That covers four situations, three of which the client
+    cannot tell apart:
     a refused or unreachable coordinator (nothing sent, true count zero),
     a reply saying no healthy node was available (nothing routed, true
     count zero), and a round trip that sent everything and got no reply
-    back (true count unknown, possibly more than zero).
+    back (true count unknown, possibly more than zero). A fourth reaches
+    it too — the coordinator's own validation rejection, answered before
+    the retry loop starts — but that one is distinguishable, since it
+    carries `fault: "client"`.
 
     So the note below says only what holds across all three — that this
     client did not learn who served the hop, and the figures are a floor.
     It is deliberately weaker than the code could be: "no reply arrived"
     would be false on the no-healthy-node path, where a full reply did
-    arrive. Distinguishing them from the Hop alone is impossible today
-    — all three give `elapsed_ms=None`, `exposed=[]` and `fault=None`, and
-    only the reason string differs, which this project does not match on
-    across a component boundary. Issue #71 is where the coordinator-side
-    signal that would make this exact belongs.
+    arrive. Distinguishing them from the Hop alone is impossible today,
+    and stays that way after #71: that issue relays `fault: "node"` for
+    a node's own crash or timeout, and both already carried a populated
+    `elapsed_ms` — neither was ever one of these three situations. The
+    three remain indistinguishable on purpose: #58 decided a
+    no-healthy-node reply stays faultless, and a client-side transport
+    failure has no coordinator-side signal to relay in the first place.
     """
     exposure = flow.exposure()
     print("\nwho saw what:")
@@ -169,11 +175,10 @@ def _print_exposure(flow: Flow, who_served_unknown: bool) -> None:
         #
         # The design doc for issue #59 is the reference for why exposure
         # is a floor. The flow library's Hop docstring covers the same
-        # ground for the transport-failure case, but it is not the
-        # authority for the condition tested here: it says `elapsed_ms` is
-        # None "whenever no reply arrived to carry it", which the
-        # no-healthy-node path disproves. That wording is #71's to fix —
-        # it is under src/, and #60 does not touch the library.
+        # ground for the transport-failure case; #71 corrected its
+        # `elapsed_ms` wording to also name the no-healthy-node path
+        # explicitly, rather than leaving the mismatch this comment used
+        # to flag.
         print(
             "\n  note: this client never learned who — if anyone — served "
             "that hop, so read these figures as a floor rather than a count."
@@ -199,22 +204,21 @@ def main(argv: list[str] | None = None) -> int:
         elif exc.fault == "node":
             print("  fault: node — the volunteer's machine failed, not your request")
         else:
-            # No `fault` field came back. Today that covers two unrelated
-            # situations, which is why this says nothing about whether a
-            # node was reached: a transport failure where no reply arrived
-            # at all, and *every* node-side failure — crash, timeout, no
-            # healthy node — because the coordinator's reject() only ever
-            # sets `fault` for client faults. Issue #71 tracks giving
-            # node-side failures their "node" fault; when it lands, the
-            # second group moves to the branch above and this one narrows
-            # to genuine transport failures. The exposure section below
-            # does not resolve the ambiguity either, and does not try to:
-            # its caveat is about whether this client learned *who* served
-            # the hop, which is a different question from whether a reply
-            # arrived. A no-healthy-node reply arrives and still names
-            # nobody, so it prints a floor. The three paths that reach
-            # that caveat are indistinguishable from a Hop today — see
-            # _print_exposure — and #71 is what would separate them.
+            # No `fault` field came back. Since #71, that no longer
+            # covers node-side failures: crash and timeout both arrive
+            # tagged `fault: "node"` now, handled in the branch above.
+            # What remains here is narrower but still two situations: a
+            # transport failure where no reply arrived at all, and a
+            # `no healthy node for model X` reply, which the coordinator
+            # deliberately still sends faultless (#58: it is neither the
+            # client's mistake nor any node's). The exposure section
+            # below does not resolve that remaining ambiguity either,
+            # and does not try to: its caveat is about whether this
+            # client learned *who* served the hop, a different question
+            # from whether a reply arrived. A no-healthy-node reply
+            # arrives and still names nobody, so it prints a floor. The
+            # two paths that reach that caveat are indistinguishable
+            # from a Hop alone — see _print_exposure.
             print("  fault: unattributed — nothing came back saying whose failure this was")
         _print_hops(flow)
         # `elapsed_ms` is the coordinator's own measure of routing time,

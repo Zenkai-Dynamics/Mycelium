@@ -284,6 +284,41 @@ async def test_main_reports_a_failed_hop_without_a_traceback(tmp_path, capsys):
     assert "floor" not in out
 
 
+async def test_main_reports_a_node_fault_distinctly_from_unattributed(tmp_path, capsys):
+    """Exercises `main()`'s `elif exc.fault == "node":` branch. It already
+    existed in the source but nothing before #71 could ever trigger it
+    against a real coordinator, and nothing tested it. This test talks to
+    a fake coordinator that sends `fault: "node"` directly, so it pins the
+    example's own branching logic independently of the coordinator fix."""
+    agent = _load_example()
+    fake = _FakeCoordinator(_queued([{
+        "type": "complete_error", "reason": "vLLM exploded",
+        "fault": "node",
+        "exposed": [{"node_handle": "a3f9c2e1b4d6f8a0", "identity_handle": "7b1d4408c2e6f1a3"}],
+        "elapsed_ms": 118,
+    }]))
+    running, url, cert_path = await _serve_fake(tmp_path, fake)
+    token_file = tmp_path / "token.txt"
+    token_file.write_text("secret-token")
+
+    try:
+        status = await asyncio.to_thread(agent.main, [
+            "--coordinator-url", url,
+            "--coordinator-cert", str(cert_path),
+            "--token-file", str(token_file),
+        ])
+    finally:
+        running.close()
+        await running.wait_closed()
+
+    assert status == 1
+    out = capsys.readouterr().out
+    assert "vLLM exploded" in out
+    assert "  fault: node \u2014 the volunteer's machine failed, not your request" in out
+    assert "node a3f9c2e1b4d6f8a0 saw hops [0]" in out
+    assert "floor" not in out
+
+
 async def test_main_says_exposure_is_a_floor_when_no_reply_arrived(tmp_path, capsys):
     """No reply arrived, so this client never learned who — if anyone —
     saw the hop, and the exposure figures understate it.
@@ -330,10 +365,12 @@ async def test_main_says_exposure_is_a_floor_when_no_reply_arrived(tmp_path, cap
 
 
 async def test_main_does_not_call_a_full_reply_a_floor(tmp_path, capsys):
-    """A node-side failure comes back as a complete_error carrying no
-    `fault` field but a populated `exposed` — the coordinator's reject()
-    only ever sets `fault` for client faults (issue #71), while every
-    reply names who saw the content.
+    """A `no healthy node` reply that arrives after an earlier node in the
+    same request already dropped mid-flight: `exposed` is populated (that
+    node read the content) but the coordinator's reject() still sends no
+    `fault`, on purpose (#58: no healthy node belongs to neither party) —
+    even though #71 made it set `fault: "node"` for the node's own crash
+    or timeout. Every reply, faulted or not, names who saw the content.
 
     That reply arrived. The client knows exactly who saw the hop, so the
     figures are a count. Keying the caveat off `fault is None` made the
@@ -343,7 +380,7 @@ async def test_main_does_not_call_a_full_reply_a_floor(tmp_path, capsys):
     """
     agent = _load_example()
     fake = _FakeCoordinator(_queued([{
-        "type": "complete_error", "reason": "node crashed mid-generation",
+        "type": "complete_error", "reason": "no healthy node for model 'big-model'",
         "exposed": [{
             "node_handle": "a3f9c2e1b4d6f8a0", "identity_handle": "7b1d4408c2e6f1a3",
         }],

@@ -413,15 +413,19 @@ except HopError as exc:
     elif exc.fault == "node":
         ...  # the node's problem — another model or another attempt
     else:
-        # fault is None: no node ever judged this request — the
-        # coordinator was unreachable, or never answered.
+        # fault is None: no node judged this request, but that is not
+        # only a transport failure — a `no healthy node` reply arrives
+        # in full and carries no fault either (#58: it is neither the
+        # client's mistake nor any node's).
         ...
     print(exc.hop.exposed)  # any volunteer that read it regardless
 ```
 
-`exc.fault` is `None` when no node ever judged the request — a transport
-failure, where blaming a volunteer would be wrong. Branch on `"client"` and
-`"node"` explicitly rather than treating "not client" as the node's fault.
+`exc.fault` is `None` when no node judged the request. That covers two
+different things: a transport failure, where no reply arrived at all, and a
+`no healthy node` reply, which does arrive but blames nobody — neither the
+client's mistake nor any volunteer's. Branch on `"client"` and `"node"`
+explicitly rather than treating "not client" as the node's fault.
 
 Keeping a conversation within a model's context window is your job. The node
 never silently truncates.
