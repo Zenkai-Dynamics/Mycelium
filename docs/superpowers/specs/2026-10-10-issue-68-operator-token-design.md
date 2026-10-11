@@ -1,7 +1,9 @@
 # Issue #68 — Operator-Facing Requests Share the Client Token — Design
 
 Date: 2026-10-10
-Status: Approved, not yet implemented
+Status: Approved and implemented (docs/OPERATIONS.md, status_cli.py,
+ban_cli.py, registry.py — see issue #57's design doc, which needed this
+done first)
 Related: [issue #63's design](2026-09-05-issue-63-exposure-handles-design.md)
 (the whole-branch review that surfaced this gap), [issue #68](https://github.com/Zenkai-Dynamics/Mycelium/issues/68),
 [PRD: issue #54](https://github.com/Zenkai-Dynamics/Mycelium/issues/54)

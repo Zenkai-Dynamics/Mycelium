@@ -1,7 +1,7 @@
 """CLI entry point for querying the coordinator's node registry.
 
 See the design doc for issue #8. Connects like a node would (same TLS
-cert, same shared token) but as a one-shot request/response, not a
+cert, same operator token) but as a one-shot request/response, not a
 long-lived connection — this is an operator tool, not a node agent.
 """
 
