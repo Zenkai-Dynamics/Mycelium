@@ -14,6 +14,7 @@ import json
 import os
 
 import torch
+from huggingface_hub import hf_hub_download
 from safetensors import safe_open
 from torch import nn
 from transformers import DynamicCache, Qwen2Config
@@ -126,6 +127,28 @@ def _needed_tensors(weight_map: dict[str, str], first: int, last: int) -> dict[s
         if layer is not None and first <= layer[0] <= last:
             needed[name] = shard
     return needed
+
+
+def fetch_checkpoint(model: str, first: int, last: int, *, fetch=hf_hub_download) -> str:
+    """Local directory holding what `load_stage(…, first, last)` reads.
+
+    A Hub model downloads only `config.json`, the shard index, and the
+    shards containing layers `first..last` — about a quarter of Qwen2.5-72B
+    for a four-stage chain, instead of all of it. `fetch` is injectable for
+    tests only; production callers take the real downloader.
+    """
+    if os.path.isdir(model):
+        return model
+    checkpoint_dir = os.path.dirname(fetch(model, "config.json"))
+    try:
+        fetch(model, INDEX_FILE)
+    except Exception:
+        # Small models ship one unsharded file and no index.
+        fetch(model, SINGLE_FILE)
+        return checkpoint_dir
+    for shard in sorted(set(_needed_tensors(_weight_map(checkpoint_dir), first, last).values())):
+        fetch(model, shard)
+    return checkpoint_dir
 
 
 def load_stage(

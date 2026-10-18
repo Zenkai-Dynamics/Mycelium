@@ -174,3 +174,43 @@ def test_pass_beyond_context_window_is_rejected(reference):
     with pytest.raises(stage_engine.StageInputError, match="context window"):
         stage.forward("s", torch.zeros(1, 3, 64))  # 30 + 3 > 32
     assert stage.session_length("s") == 30
+
+
+def fake_hub(reference_dir, requested):
+    """Stands in for hf_hub_download: serves files from the local tiny
+    checkpoint and records every filename asked for."""
+    import os
+
+    def fetch(repo_id, filename):
+        requested.append(filename)
+        return os.path.join(reference_dir, filename)
+
+    return fetch
+
+
+def test_fetch_downloads_only_this_stages_shards(reference):
+    import json
+    import os
+
+    _, path = reference
+    requested = []
+    weight_map = json.load(open(os.path.join(path, "model.safetensors.index.json")))["weight_map"]
+    wanted = {s for n, s in weight_map.items() if n.startswith(("model.layers.2.", "model.layers.3."))}
+    unwanted = set(weight_map.values()) - wanted
+
+    local = stage_engine.fetch_checkpoint("org/tiny", 2, 3, fetch=fake_hub(path, requested))
+    stage = load_stage(local, 2, 3, dtype=torch.float32)
+
+    assert {"config.json", "model.safetensors.index.json"} <= set(requested)
+    assert wanted <= set(requested)
+    assert not (unwanted & set(requested))
+    assert stage.config.num_hidden_layers == 2
+
+
+def test_fetch_passes_a_local_directory_through(reference):
+    _, path = reference
+
+    def no_fetch(repo_id, filename):
+        pytest.fail("a local directory must not hit the Hub")
+
+    assert stage_engine.fetch_checkpoint(path, 0, 1, fetch=no_fetch) == path
