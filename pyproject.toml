@@ -26,6 +26,14 @@ node = [
     "vllm[audio]==0.25.1",
 ]
 client = []
+# Phase 3 stage node (issue #78). Same versions uv.lock already resolves
+# through vllm; kept out of `node` so it installs on macOS for tests.
+stage = [
+    "torch==2.11.0",
+    "transformers==5.15.0",
+    "safetensors==0.8.0",
+    "huggingface-hub==1.27.0",
+]
 
 [project.scripts]
 mycelium-node = "mycelium.node.cli:main"

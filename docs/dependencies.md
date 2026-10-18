@@ -69,6 +69,22 @@ have caught the `nvidia-cuda-nvcc` drift documented above (see the issue
 
 Never hand-edit either file.
 
+## Pinned versions (`mycelium[stage]`)
+
+Phase 3's stage engine (issue #78) runs a contiguous range of a model's
+layers on HF transformers, not vLLM — see the
+[Phase 3 design doc](superpowers/specs/2026-10-18-phase-3-model-parallelism-design.md).
+
+| Package | Version | Why this exact version |
+|---|---|---|
+| `torch` | 2.11.0 | The version `uv.lock` already resolves through `vllm[audio]==0.25.1`. |
+| `transformers` | 5.15.0 | Same — already resolved through vLLM; the stage engine depends on its Qwen2 internals (`Qwen2Model`, `Qwen2RotaryEmbedding`, `DynamicCache`). |
+| `safetensors` | 0.8.0 | Same — reads only the checkpoint tensors a stage needs. |
+| `huggingface-hub` | 1.27.0 | Same — downloads only the shards holding a stage's layers. |
+
+Deliberately a separate extra rather than part of `node`: `node` is
+Linux-only (vLLM), while the stage engine's tests run on any platform.
+
 ## Installing the node extra
 
 ```bash

@@ -57,6 +57,15 @@ Works on macOS, Linux, or Windows — no GPU needed.
    .venv/bin/pip install -e .        # Windows: .venv\Scripts\pip install -e .
    ```
 
+   To run the Phase 3 stage engine's tests (`tests/node/test_stage_engine.py`),
+   also install the `stage` extra — CPU-only torch is enough, no GPU needed:
+
+   ```bash
+   uv pip install -e ".[stage]"
+   ```
+
+   Without it those tests are skipped, not failed.
+
 3. Verify the install. All three commands open real functionality now (the
    node/coordinator open a coordinator↔node WebSocket transport — see
    [ADR-0002](adr/0002-node-transport-model.md); the client sends a real
