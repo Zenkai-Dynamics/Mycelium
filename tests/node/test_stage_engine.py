@@ -143,3 +143,34 @@ def test_forward_on_never_opened_session_is_unknown(reference):
 
     with pytest.raises(stage_engine.UnknownSessionError):
         stage.forward("never-opened", torch.zeros(1, 1, 64))
+
+
+@pytest.mark.parametrize(
+    "bad, reason",
+    [
+        (torch.zeros(1, 64), "rank"),
+        (torch.zeros(2, 3, 64), "batch"),
+        (torch.zeros(1, 0, 64), "empty"),
+        (torch.zeros(1, 3, 63), "hidden size"),
+        (torch.zeros(1, 3, 64, dtype=torch.float16), "dtype"),
+    ],
+)
+def test_malformed_hidden_states_are_rejected(reference, bad, reason):
+    _, path = reference
+    stage = load_stage(path, 0, 1, dtype=torch.float32)
+    stage.open_session("s")
+
+    with pytest.raises(stage_engine.StageInputError, match=reason):
+        stage.forward("s", bad)
+    assert stage.session_length("s") == 0  # cache untouched
+
+
+def test_pass_beyond_context_window_is_rejected(reference):
+    _, path = reference
+    stage = load_stage(path, 0, 1, dtype=torch.float32)
+    stage.open_session("s")
+    stage.forward("s", torch.zeros(1, 30, 64))
+
+    with pytest.raises(stage_engine.StageInputError, match="context window"):
+        stage.forward("s", torch.zeros(1, 3, 64))  # 30 + 3 > 32
+    assert stage.session_length("s") == 30

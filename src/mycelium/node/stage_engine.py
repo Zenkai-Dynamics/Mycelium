@@ -34,6 +34,11 @@ class UnknownSessionError(KeyError):
     empty cache and return confidently wrong activations."""
 
 
+class StageInputError(ValueError):
+    """Hidden states this stage can't accept. A client fault (#58): the
+    stage served the request correctly and the input was wrong."""
+
+
 class StageEngine:
     """Layers `first..last` (inclusive) of one model, plus per-session KV caches."""
 
@@ -42,6 +47,7 @@ class StageEngine:
         self.config = config
         self.first = first
         self.last = last
+        self._dtype = next(module.parameters()).dtype
         self._sessions: dict[str, DynamicCache] = {}
 
     def open_session(self, session_id: str) -> None:
@@ -60,10 +66,30 @@ class StageEngine:
     def session_length(self, session_id: str) -> int:
         return self._cache(session_id).get_seq_length()
 
+    def _check(self, cache: DynamicCache, hidden: torch.Tensor) -> None:
+        if hidden.dim() != 3:
+            raise StageInputError(f"expected rank 3 [1, seq, hidden], got rank {hidden.dim()}")
+        batch, seq, size = hidden.shape
+        if batch != 1:
+            raise StageInputError(f"batch must be 1, got {batch}")
+        if seq == 0:
+            raise StageInputError("empty sequence")
+        if size != self.config.hidden_size:
+            raise StageInputError(f"hidden size must be {self.config.hidden_size}, got {size}")
+        if hidden.dtype != self._dtype:
+            raise StageInputError(f"dtype must be {self._dtype}, got {hidden.dtype}")
+        limit = self.config.max_position_embeddings
+        if cache.get_seq_length() + seq > limit:
+            raise StageInputError(
+                f"{cache.get_seq_length()} cached + {seq} new tokens exceeds the "
+                f"context window of {limit}"
+            )
+
     @torch.no_grad()
     def forward(self, session_id: str, hidden_states: torch.Tensor) -> torch.Tensor:
         cache = self._cache(session_id)
-        out = self.module(inputs_embeds=hidden_states, past_key_values=cache, use_cache=True)
+        self._check(cache, hidden_states)
+        out =self.module(inputs_embeds=hidden_states, past_key_values=cache, use_cache=True)
         return out.last_hidden_state
 
 
