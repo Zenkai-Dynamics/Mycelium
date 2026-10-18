@@ -109,3 +109,13 @@ unaffected by a phase-level documentation ticket. Resolving or restating
 issue #68's decision — this doc only needs to *describe* the resulting
 contrast between the two disclosure mechanisms accurately, not re-argue
 why they're shaped that way.
+
+## Amendment (2026-10-18)
+
+Before shipping, a re-read against #68's fourth acceptance criterion found
+bullet 2's "a client checking its own flow's exposure cannot" overclaimed:
+under #68's decision the only client *is* the operator, whose token can
+list every identity via `status_query`, and a model served by a single
+node makes a handle trivially attributable. Bullet 2 now says so, and
+scopes the handle's protection to completion replies, and to a future
+non-operator client — #68's revisit trigger.

@@ -584,7 +584,13 @@ opaque handle, not a name: `Flow.exposure()` groups hops by a
 identity or GitHub login, by design (issue #63). That is a different, and
 deliberately weaker, disclosure than `mycelium-coordinator-status` gives
 the *operator* — the operator token resolves real identities (see Step
-1); a client checking its own flow's exposure cannot. Use
+1); a client checking its own flow's exposure cannot. In this phase,
+though, the only client is the operator, and the same token lists every
+volunteer's identity through `mycelium-coordinator-status` — and where
+only one node serves a model, matching a handle to that node is trivial.
+What the handle gives today is that completion replies never volunteer
+an identity; it protects volunteers from a client only once someone other
+than the operator holds a client token, which Step 1 says not to do. Use
 `Flow.exposure()` (or the reference agent's printed report,
 `examples/draft_then_critique.py`) to confirm the explicit-context
 property held for a specific run — it will not tell you which volunteer
