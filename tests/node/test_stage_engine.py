@@ -214,3 +214,34 @@ def test_fetch_passes_a_local_directory_through(reference):
         pytest.fail("a local directory must not hit the Hub")
 
     assert stage_engine.fetch_checkpoint(path, 0, 1, fetch=no_fetch) == path
+
+
+def test_fetch_falls_back_to_single_file_when_no_index(tmp_path):
+    from huggingface_hub.errors import EntryNotFoundError
+
+    requested = []
+
+    def fetch(repo_id, filename):
+        requested.append(filename)
+        if filename == "model.safetensors.index.json":
+            raise EntryNotFoundError("no index")
+        return str(tmp_path / filename)
+
+    local = stage_engine.fetch_checkpoint("org/tiny", 0, 1, fetch=fetch)
+
+    assert "model.safetensors" in requested
+    assert local == str(tmp_path)
+
+
+def test_fetch_propagates_non_not_found_errors(tmp_path):
+    requested = []
+
+    def fetch(repo_id, filename):
+        requested.append(filename)
+        if filename == "model.safetensors.index.json":
+            raise RuntimeError("network down")
+        return str(tmp_path / filename)
+
+    with pytest.raises(RuntimeError, match="network down"):
+        stage_engine.fetch_checkpoint("org/tiny", 0, 1, fetch=fetch)
+    assert "model.safetensors" not in requested
