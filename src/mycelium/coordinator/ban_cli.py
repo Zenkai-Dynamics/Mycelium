@@ -1,7 +1,7 @@
 """CLI entry point for banning a node's bound GitHub identity.
 
 See the design doc for issue #37. Connects the same way
-mycelium-coordinator-status does (same TLS cert, same shared token) as a
+mycelium-coordinator-status does (same TLS cert, same operator token) as a
 one-shot request/response — this is a manual operator override, not a
 node agent. There is no unban command: ban state is in-memory only, like
 every other piece of coordinator state, so a coordinator restart is the

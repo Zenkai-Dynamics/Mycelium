@@ -103,7 +103,7 @@ def _reputation_dict(counters: ReputationCounters | None) -> dict:
 
 
 class NodeRegistry:
-    """Holds the shared token and the current set of registered nodes."""
+    """Holds the operator token and the current set of registered nodes."""
 
     def __init__(
         self,
@@ -156,7 +156,7 @@ class NodeRegistry:
         # flows across time. Injectable for tests only (see
         # identity_verifier and random_source for the same pattern);
         # production callers take the random default. Deliberately NOT
-        # derived from the shared token — clients hold that, and could
+        # derived from the operator token — clients hold that, and could
         # then resolve every handle. See the design doc for issue #63.
         self._handle_secret = handle_secret or secrets.token_bytes(32)
 

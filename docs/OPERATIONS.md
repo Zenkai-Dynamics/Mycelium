@@ -44,15 +44,14 @@ coordinator's own cert file *is* the trust anchor (see
 ["The trust model in one paragraph"](#the-trust-model-in-one-paragraph)
 below).
 
-## Step 1 — Create a shared token
+## Step 1 — Create an operator token
 
 Every **client** request (and the coordinator's own bootstrap) authenticates
-with the same secret token, compared with `hmac.compare_digest` (not sent
+with the same operator token, compared with `hmac.compare_digest` (not sent
 as a CLI flag or environment variable; always a file). **Nodes no longer
 use this token** (see Step 3) — as of issue #39, a node's identity is its
 own self-generated keypair plus a one-time GitHub sign-in, not a shared
-secret. Generate the client/coordinator token and put it somewhere only
-you can read:
+secret. Generate the operator token and put it somewhere only you can read:
 
 ```bash
 mkdir -p ~/.mycelium
@@ -61,9 +60,13 @@ chmod 600 ~/.mycelium/token
 ```
 
 Copy this same file (or its contents) to every client machine —
-`scp ~/.mycelium/token <client-host>:~/.mycelium/token`, etc. Anyone who
-has it can submit completions **and ban any node's identity** (see
-Step 6), so treat it like a password.
+`scp ~/.mycelium/token <client-host>:~/.mycelium/token`, etc. **This is an
+operator credential, not an ordinary client secret**: anyone who has it
+can submit completions, enumerate every connected node's fingerprint and
+bound GitHub identity (`mycelium-coordinator-status`), and ban any node's
+identity outright (`mycelium-coordinator-ban`, see Step 6). Treat it like
+a password, and do not hand it to a client you don't trust with
+operator-level access to the network.
 
 ## Step 2 — Start the coordinator
 
@@ -555,6 +558,43 @@ itself. This is the same transparency model Folding@home already uses
 for its work units: you're handing work to a stranger's machine, and
 that machine necessarily sees what it's computing. Don't send anything
 through Mycelium you wouldn't want a volunteer operator to read.
+
+**A multi-hop flow lets each successive volunteer see more than any single
+hop ever discloses.** Phase 1's risk is per-hop: one volunteer sees one
+prompt. Phase 2 adds a different risk — *aggregation*: left unchecked, a
+flow's third hop could see the original task plus both prior models'
+output, so exposure per volunteer grows with the length of the flow even
+though no single hop reveals more than Phase 1 already does. The client
+library addresses this structurally, not as a setting you must remember
+to turn on: it never carries context forward implicitly, and sends only
+what each call explicitly names (see
+[ADR-0004](adr/0004-explicit-per-hop-context.md)). An agent that wants an
+earlier hop's output in a later one must pass it on purpose. Hardware
+confidential computing (GPU TEEs) was investigated as an alternative and
+rejected as *unavailable*, not undesirable — it requires Hopper H100 or
+newer, and the Ampere cards this project runs on cannot do it at all.
+**None of this makes inference private.** It narrows how much each
+volunteer sees, not whether they see it; the plaintext-exposure bullet
+above still applies to every hop.
+
+**Checking what a volunteer actually received does not tell you who they
+are.** Every `Flow` reports, per hop, which volunteer saw it — but as an
+opaque handle, not a name: `Flow.exposure()` groups hops by a
+16-character HMAC handle that cannot be resolved back to a node's
+identity or GitHub login, by design (issue #63). That is a different, and
+deliberately weaker, disclosure than `mycelium-coordinator-status` gives
+the *operator* — the operator token resolves real identities (see Step
+1); a client checking its own flow's exposure cannot. In this phase,
+though, the only client is the operator, and the same token lists every
+volunteer's identity through `mycelium-coordinator-status` — and where
+only one node serves a model, matching a handle to that node is trivial.
+What the handle gives today is that completion replies never volunteer
+an identity; it protects volunteers from a client only once someone other
+than the operator holds a client token, which Step 1 says not to do. Use
+`Flow.exposure()` (or the reference agent's printed report,
+`examples/draft_then_critique.py`) to confirm the explicit-context
+property held for a specific run — it will not tell you which volunteer
+that was.
 
 **Mycelium does not verify a node's output is correct.** The coordinator
 only checks protocol-level health — did the node respond, time out, or
