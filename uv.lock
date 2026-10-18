@@ -1385,6 +1385,12 @@ node = [
     { name = "ray", extra = ["llm"] },
     { name = "vllm", extra = ["audio"] },
 ]
+stage = [
+    { name = "huggingface-hub" },
+    { name = "safetensors" },
+    { name = "torch" },
+    { name = "transformers" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -1395,11 +1401,15 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "cryptography", specifier = "==50.0.0" },
+    { name = "huggingface-hub", marker = "extra == 'stage'", specifier = "==1.27.0" },
     { name = "ray", extras = ["llm"], marker = "extra == 'node'", specifier = "==2.57.0" },
+    { name = "safetensors", marker = "extra == 'stage'", specifier = "==0.8.0" },
+    { name = "torch", marker = "extra == 'stage'", specifier = "==2.11.0" },
+    { name = "transformers", marker = "extra == 'stage'", specifier = "==5.15.0" },
     { name = "vllm", extras = ["audio"], marker = "extra == 'node'", specifier = "==0.25.1" },
     { name = "websockets", specifier = "==17.0.1" },
 ]
-provides-extras = ["node", "client"]
+provides-extras = ["node", "client", "stage"]
 
 [package.metadata.requires-dev]
 dev = [
