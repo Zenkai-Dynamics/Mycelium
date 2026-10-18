@@ -15,7 +15,7 @@ import os
 
 import torch
 from huggingface_hub import hf_hub_download
-from huggingface_hub.errors import EntryNotFoundError
+from huggingface_hub.errors import RemoteEntryNotFoundError
 from safetensors import safe_open
 from torch import nn
 from transformers import DynamicCache, Qwen2Config
@@ -160,7 +160,7 @@ def fetch_checkpoint(model: str, first: int, last: int, *, fetch=hf_hub_download
     checkpoint_dir = os.path.dirname(fetch(model, "config.json"))
     try:
         fetch(model, INDEX_FILE)
-    except EntryNotFoundError:
+    except RemoteEntryNotFoundError:
         # Small models ship one unsharded file and no index.
         fetch(model, SINGLE_FILE)
         return checkpoint_dir

@@ -194,7 +194,9 @@ def test_fetch_downloads_only_this_stages_shards(reference):
 
     _, path = reference
     requested = []
-    weight_map = json.load(open(os.path.join(path, "model.safetensors.index.json")))["weight_map"]
+    index_path = os.path.join(path, "model.safetensors.index.json")
+    with open(index_path) as f:
+        weight_map = json.load(f)["weight_map"]
     wanted = {s for n, s in weight_map.items() if n.startswith(("model.layers.2.", "model.layers.3."))}
     unwanted = set(weight_map.values()) - wanted
 
@@ -217,14 +219,20 @@ def test_fetch_passes_a_local_directory_through(reference):
 
 
 def test_fetch_falls_back_to_single_file_when_no_index(tmp_path):
-    from huggingface_hub.errors import EntryNotFoundError
+    import httpx
+    from huggingface_hub.errors import RemoteEntryNotFoundError
 
     requested = []
 
     def fetch(repo_id, filename):
         requested.append(filename)
         if filename == "model.safetensors.index.json":
-            raise EntryNotFoundError("no index")
+            raise RemoteEntryNotFoundError(
+                "no index",
+                response=httpx.Response(
+                    404, request=httpx.Request("GET", "https://huggingface.co/x")
+                ),
+            )
         return str(tmp_path / filename)
 
     local = stage_engine.fetch_checkpoint("org/tiny", 0, 1, fetch=fetch)
@@ -287,3 +295,19 @@ def test_client_faults_share_a_base_and_checkpoint_error_is_not_one():
     assert issubclass(stage_engine.UnknownSessionError, client)
     assert issubclass(stage_engine.SessionAlreadyOpenError, client)
     assert not issubclass(stage_engine.CheckpointError, client)
+
+
+def test_offline_index_fetch_propagates_and_does_not_fall_back(tmp_path):
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    requested = []
+
+    def fetch(repo_id, filename):
+        requested.append(filename)
+        if filename == "model.safetensors.index.json":
+            raise LocalEntryNotFoundError("offline")
+        return str(tmp_path / filename)
+
+    with pytest.raises(LocalEntryNotFoundError):
+        stage_engine.fetch_checkpoint("org/tiny", 0, 1, fetch=fetch)
+    assert "model.safetensors" not in requested
