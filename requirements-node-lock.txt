@@ -210,6 +210,7 @@ cryptography==50.0.0 ; platform_machine == 'x86_64' and sys_platform == 'linux' 
     --hash=sha256:eeac2acb5a20ed25e0ad6d1df9891a520b78b404266b6d11778f25d5d691a6c9
     # via
     #   google-auth
+    #   mycelium
     #   pyjwt
 cuda-bindings==13.3.1 ; platform_machine == 'x86_64' and sys_platform == 'linux' \
     --hash=sha256:04436a9364059c84b8f9636f359eccda1cf814341f5b670c71d80d2f79dbc708 \
