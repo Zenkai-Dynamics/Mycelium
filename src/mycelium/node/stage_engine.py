@@ -89,7 +89,7 @@ class StageEngine:
     def forward(self, session_id: str, hidden_states: torch.Tensor) -> torch.Tensor:
         cache = self._cache(session_id)
         self._check(cache, hidden_states)
-        out =self.module(inputs_embeds=hidden_states, past_key_values=cache, use_cache=True)
+        out = self.module(inputs_embeds=hidden_states, past_key_values=cache, use_cache=True)
         return out.last_hidden_state
 
 
