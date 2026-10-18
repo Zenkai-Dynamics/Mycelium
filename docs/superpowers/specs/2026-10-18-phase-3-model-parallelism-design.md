@@ -1,7 +1,7 @@
 # Phase 3 — Model Parallelism (Layer Splitting) — Design
 
 Date: 2026-10-18
-Status: Approved, PRD not yet written, not yet implemented
+Status: Approved, PRD published as issue #77, not yet implemented
 Related: [ADR-0005 — coordinator-chained pipeline relay](../../adr/0005-coordinator-chained-pipeline-relay.md),
 [ADR-0002 — node transport model](../../adr/0002-node-transport-model.md),
 [ADR-0003 — client-side orchestration](../../adr/0003-client-side-orchestration.md),

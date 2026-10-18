@@ -1,6 +1,6 @@
 # Phase 3 — Model Parallelism (Layer Splitting)
 
-Status: Designed, not yet built
+Status: Designed, not yet built ([PRD: issue #77](https://github.com/Zenkai-Dynamics/Mycelium/issues/77))
 Depends on: [Phase 2](phase-2-multi-llm-agentic.md) multi-host mechanics
 Related: [Phase 3 design rationale](../superpowers/specs/2026-10-18-phase-3-model-parallelism-design.md),
 [ADR-0005 — coordinator-chained pipeline relay](../adr/0005-coordinator-chained-pipeline-relay.md),
