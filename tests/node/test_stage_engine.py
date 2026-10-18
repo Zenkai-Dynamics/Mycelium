@@ -245,3 +245,45 @@ def test_fetch_propagates_non_not_found_errors(tmp_path):
     with pytest.raises(RuntimeError, match="network down"):
         stage_engine.fetch_checkpoint("org/tiny", 0, 1, fetch=fetch)
     assert "model.safetensors" not in requested
+
+
+def test_failed_pass_drops_the_session(reference, monkeypatch):
+    _, path = reference
+    stage = load_stage(path, 0, 1, dtype=torch.float32)
+    stage.open_session("s")
+    stage.forward("s", torch.zeros(1, 3, 64))
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(stage.module.layers[1], "forward", boom)
+    with pytest.raises(RuntimeError, match="boom"):
+        stage.forward("s", torch.zeros(1, 1, 64))
+    with pytest.raises(stage_engine.UnknownSessionError):
+        stage.forward("s", torch.zeros(1, 1, 64))
+
+
+@pytest.mark.parametrize("first, last", [(2, 10), (4, 4), (-1, 1), (3, 1)])
+def test_invalid_layer_range_is_a_checkpoint_error(reference, first, last):
+    _, path = reference
+    with pytest.raises(stage_engine.CheckpointError, match=r"layers? .*4"):
+        load_stage(path, first, last, dtype=torch.float32)
+
+
+def test_reopening_an_open_session_raises_and_keeps_the_cache(reference):
+    _, path = reference
+    stage = load_stage(path, 0, 1, dtype=torch.float32)
+    stage.open_session("s")
+    stage.forward("s", torch.zeros(1, 3, 64))
+
+    with pytest.raises(stage_engine.SessionAlreadyOpenError):
+        stage.open_session("s")
+    assert stage.session_length("s") == 3
+
+
+def test_client_faults_share_a_base_and_checkpoint_error_is_not_one():
+    client = stage_engine.StageClientError
+    assert issubclass(stage_engine.StageInputError, client)
+    assert issubclass(stage_engine.UnknownSessionError, client)
+    assert issubclass(stage_engine.SessionAlreadyOpenError, client)
+    assert not issubclass(stage_engine.CheckpointError, client)

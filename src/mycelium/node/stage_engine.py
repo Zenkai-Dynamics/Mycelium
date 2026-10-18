@@ -30,15 +30,25 @@ class CheckpointError(Exception):
     """The checkpoint doesn't contain every tensor this stage's layers need."""
 
 
-class UnknownSessionError(KeyError):
+class StageClientError(Exception):
+    """Base for every error that is the client's fault (#58). It must not
+    damage a node's reputation: the stage behaved correctly."""
+
+
+class UnknownSessionError(StageClientError, KeyError):
     """No open session with this id. A stage never creates a cache on first
     use: a stage that lost its state must fail, not compute against an
     empty cache and return confidently wrong activations."""
 
 
-class StageInputError(ValueError):
+class StageInputError(StageClientError, ValueError):
     """Hidden states this stage can't accept. A client fault (#58): the
     stage served the request correctly and the input was wrong."""
+
+
+class SessionAlreadyOpenError(StageClientError):
+    """A session with this id is already open. Reopening would silently reset
+    its cache, so the caller must free it or pick another id."""
 
 
 class StageEngine:
@@ -53,6 +63,8 @@ class StageEngine:
         self._sessions: dict[str, DynamicCache] = {}
 
     def open_session(self, session_id: str) -> None:
+        if session_id in self._sessions:
+            raise SessionAlreadyOpenError(session_id)
         self._sessions[session_id] = DynamicCache(config=self.config)
 
     def _cache(self, session_id: str) -> DynamicCache:
@@ -91,7 +103,12 @@ class StageEngine:
     def forward(self, session_id: str, hidden_states: torch.Tensor) -> torch.Tensor:
         cache = self._cache(session_id)
         self._check(cache, hidden_states)
-        out = self.module(inputs_embeds=hidden_states, past_key_values=cache, use_cache=True)
+        try:
+            out = self.module(inputs_embeds=hidden_states, past_key_values=cache, use_cache=True)
+        except BaseException:
+            # The per-layer caches may be half-updated; never serve from them.
+            del self._sessions[session_id]
+            raise
         return out.last_hidden_state
 
 
@@ -166,6 +183,11 @@ def load_stage(
     ever materialized; only this stage's tensors are read from disk.
     """
     config = Qwen2Config.from_pretrained(checkpoint_dir)
+    if not 0 <= first <= last < config.num_hidden_layers:
+        raise CheckpointError(
+            f"layer range {first}..{last} is invalid for a model with "
+            f"{config.num_hidden_layers} layers"
+        )
     stage_config = _stage_config(config, first, last)
     with torch.device("meta"):
         module = Qwen2Model(stage_config)
