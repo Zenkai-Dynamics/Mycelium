@@ -28,6 +28,12 @@ class CheckpointError(Exception):
     """The checkpoint doesn't contain every tensor this stage's layers need."""
 
 
+class UnknownSessionError(KeyError):
+    """No open session with this id. A stage never creates a cache on first
+    use: a stage that lost its state must fail, not compute against an
+    empty cache and return confidently wrong activations."""
+
+
 class StageEngine:
     """Layers `first..last` (inclusive) of one model, plus per-session KV caches."""
 
@@ -41,9 +47,22 @@ class StageEngine:
     def open_session(self, session_id: str) -> None:
         self._sessions[session_id] = DynamicCache(config=self.config)
 
+    def _cache(self, session_id: str) -> DynamicCache:
+        try:
+            return self._sessions[session_id]
+        except KeyError:
+            raise UnknownSessionError(session_id) from None
+
+    def free_session(self, session_id: str) -> None:
+        self._cache(session_id)
+        del self._sessions[session_id]
+
+    def session_length(self, session_id: str) -> int:
+        return self._cache(session_id).get_seq_length()
+
     @torch.no_grad()
     def forward(self, session_id: str, hidden_states: torch.Tensor) -> torch.Tensor:
-        cache = self._sessions[session_id]
+        cache = self._cache(session_id)
         out = self.module(inputs_embeds=hidden_states, past_key_values=cache, use_cache=True)
         return out.last_hidden_state
 

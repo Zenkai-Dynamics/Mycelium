@@ -88,3 +88,58 @@ def test_missing_layer_weight_fails_loudly(reference, tmp_path):
 
     with pytest.raises(stage_engine.CheckpointError, match="layers.0.mlp.up_proj.weight"):
         load_stage(str(broken), 2, 3, dtype=torch.float32)
+
+
+@torch.no_grad()
+def test_incremental_decode_matches_unsplit_model(reference):
+    model, path = reference
+    stages = two_stages(path)
+    for stage in stages:
+        stage.open_session("s")
+    prompt = torch.tensor([[1, 5, 9, 22, 7]])
+    run_chain(model, stages, "s", prompt)
+
+    next_tokens = [33, 2, 64]
+    full = prompt
+    for token in next_tokens:
+        full = torch.cat([full, torch.tensor([[token]])], dim=1)
+        got = run_chain(model, stages, "s", torch.tensor([[token]]))[:, -1]
+        torch.testing.assert_close(got, model(full).logits[:, -1], atol=1e-5, rtol=1e-5)
+
+    assert stages[0].session_length("s") == prompt.shape[1] + len(next_tokens)
+
+
+@torch.no_grad()
+def test_sessions_keep_separate_caches(reference):
+    model, path = reference
+    stages = two_stages(path)
+    for stage in stages:
+        stage.open_session("a")
+        stage.open_session("b")
+
+    run_chain(model, stages, "a", torch.tensor([[1, 2, 3, 4]]))
+    got_b = run_chain(model, stages, "b", torch.tensor([[9, 8]]))
+
+    torch.testing.assert_close(got_b, model(torch.tensor([[9, 8]])).logits, atol=1e-5, rtol=1e-5)
+    assert stages[0].session_length("a") == 4
+    assert stages[0].session_length("b") == 2
+
+
+def test_freed_session_is_unknown(reference):
+    _, path = reference
+    stage = load_stage(path, 0, 1, dtype=torch.float32)
+    stage.open_session("s")
+    stage.free_session("s")
+
+    with pytest.raises(stage_engine.UnknownSessionError):
+        stage.forward("s", torch.zeros(1, 1, 64))
+    with pytest.raises(stage_engine.UnknownSessionError):
+        stage.free_session("s")
+
+
+def test_forward_on_never_opened_session_is_unknown(reference):
+    _, path = reference
+    stage = load_stage(path, 0, 1, dtype=torch.float32)
+
+    with pytest.raises(stage_engine.UnknownSessionError):
+        stage.forward("never-opened", torch.zeros(1, 1, 64))
