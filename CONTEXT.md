@@ -110,3 +110,35 @@ client fault for a request it served correctly and the model refused. Never a
 judgement about the quality of a completion, which nothing in Mycelium
 measures.
 _Avoid_: error, blame, cause
+
+### Phase 3 — layer-split pipelines
+
+**Stage**:
+A contiguous range of one model's decoder layers, served by one stage node.
+Declared by the node (e.g. layers 20–39) and matched exactly.
+_Avoid_: shard, slice, block
+
+**Stage node**:
+A node serving a stage rather than a whole model. A node is either a model
+node or a stage node, never both.
+
+**Chain**:
+The ordered set of stage nodes that together cover every layer of a model,
+assembled by the coordinator for one session.
+_Avoid_: pipeline (when the specific nodes are meant), swarm
+
+**Session**:
+One generation's lifetime on a chain. The coordinator pins a chain to a
+session, and each stage keeps that session's KV cache. Routing state only —
+the coordinator never holds a session's tokens. Distinct from a flow, which
+spans several models; a session is one model.
+_Avoid_: conversation, connection
+
+**Pass**:
+One trip of activations through every stage of a chain and back to the
+client: a prefill, or the verification of a batch of draft tokens.
+_Avoid_: hop (a hop is a Phase 2 client↔node exchange)
+
+**Draft model**:
+The small model the client runs locally to propose tokens that a pass then
+verifies (speculative decoding). Shares the target model's tokenizer.

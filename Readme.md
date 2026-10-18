@@ -31,9 +31,9 @@ Each phase links to its own document — the full architecture and open question
 | **0** | One LLM. A small, closed pool of nodes the operator personally controls (HPC allocations, VPN-gated lab machines). Prove client → coordinator → node → response round-trips end to end. | **Building now** | [phase-0-foundation.md](docs/phases/phase-0-foundation.md) |
 | **1** | Open the pool to public, opt-in volunteer nodes — torrent/BOINC-style. Still one LLM per request; trust and abuse-prevention become real concerns. | **Built** ([PRD: issue #31](https://github.com/Zenkai-Dynamics/Mycelium/issues/31)) | [phase-1-open-network.md](docs/phases/phase-1-open-network.md) |
 | **2** | Multiple different LLMs hosted across different nodes, composed by an agent's multi-LLM flow. The client orchestrates and carries context from one model to the next. | **Designed, not yet built** | [phase-2-multi-llm-agentic.md](docs/phases/phase-2-multi-llm-agentic.md) |
-| **3** | Split a single LLM's *layers* across multiple GPU farms (pipeline/model parallelism) for models too large for any one farm to hold; activations pass host to host mid-inference. | Far future, not yet designed | [phase-3-model-parallelism.md](docs/phases/phase-3-model-parallelism.md) |
+| **3** | Split a single LLM's *layers* across several single-GPU volunteers (pipeline parallelism) so they jointly serve a bf16 70B-class model none can hold alone; the coordinator relays activations stage to stage, with speculative decoding for interactive speed. | **Designed, not yet built** | [phase-3-model-parallelism.md](docs/phases/phase-3-model-parallelism.md) |
 
-Phases 0–2 have now been designed in depth; Phase 3's doc still only records what was decided about *scope* during the initial brainstorm, plus the open questions that need their own brainstorming pass when its turn comes — it is deliberately not filled in with invented detail.
+All four phases have now been designed in depth; Phase 3's design rationale is in [its design doc](docs/superpowers/specs/2026-10-18-phase-3-model-parallelism-design.md).
 
 Non-goals for *every* phase covered by this document: payments/incentive mechanisms, model training or fine-tuning, multi-tenant SLAs. These may become relevant far downstream but are not shaping any decision made here.
 
